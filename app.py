@@ -23,7 +23,16 @@ def load_data():
 
 shipments, dispatches, utilization = load_data()
 
-api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+# API key resolution order: Streamlit Cloud secrets -> env var -> sidebar input.
+# On Streamlit Cloud, set ANTHROPIC_API_KEY in the app's Secrets settings;
+# viewers then never see or enter a key.
+api_key = ""
+try:
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+except Exception:
+    pass
+if not api_key:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
 st.sidebar.header("Configuration")
 if not api_key:
