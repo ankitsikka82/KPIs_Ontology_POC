@@ -1,213 +1,295 @@
-# ontology.py
-# Cube Utilization Semantic Ontology (v2)
+# ontology.py (v6)
+# Cube Utilization Semantic Ontology over a LEGACY PHYSICAL SCHEMA.
 #
-# WHAT CHANGED FROM v1:
-# - KPI definitions now include exact, step-by-step calculation logic
-#   (pandas-style and SQL-style) so the LLM follows a blueprint instead
-#   of guessing.
-# - Added a "query_patterns" section: worked examples mapping common
-#   business questions to exact computation steps.
-#
-# WHY THIS EXISTS:
-# An LLM given only raw table schemas has to guess what "cube utilization"
-# means, which tables to join, and what business rules apply. This ontology
-# makes that knowledge explicit and machine-readable. This is the "context
-# layer" the POC demonstrates.
+# THE POINT OF THIS VERSION:
+# The physical tables use legacy column codes (UTIL_PCT_3, LH_DSPTCH_DT,
+# ORIG_TRML_CD...) that carry no business meaning. This ontology is the ONLY
+# place where meaning lives. Without it, a model can only guess which of
+# UTIL_PCT_1/2/3 is authoritative, what 'HAR' means, or which of two date
+# columns to use. That is exactly the situation in a real enterprise warehouse.
 
 ontology = {
     "name": "Cube Utilization Ontology",
-    "description": "Semantic model for freight trailer cube utilization and asset efficiency",
-    "version": "2.0",
+    "description": "Semantic model for freight trailer cube utilization over the legacy gold-layer schema",
+    "version": "6.0",
 
     # -------------------------------------------------------------------
-    # ENTITIES: key business concepts, mapped to physical columns.
+    # PHYSICAL TABLES the queries run against
+    # -------------------------------------------------------------------
+    "physical_tables": {
+        "shpmt_mstr": "Shipment master — one row per shipment",
+        "lh_dsptch": "Linehaul dispatch — one row per TRAILER on a dispatch (a dispatch can move 2 trailers with 1 driver)",
+        "trlr_util_fct": "Trailer utilization fact — one row per trailer per dispatch, pre-computed utilization",
+        "pln_mvmt": "Planned movement — one row per routing leg per shipment"
+    },
+
+    # -------------------------------------------------------------------
+    # CODE DECODES: legacy codes -> business meaning
+    # -------------------------------------------------------------------
+    "code_decodes": {
+        "terminal_codes": {
+            "HAR": "Harrison", "SGF": "Springfield", "STL": "Saint Louis",
+            "MEM": "Memphis", "ATL": "Atlanta"
+        },
+        "CNSTRNT_CD": {
+            "C": "cube-constrained (volume limit reached first)",
+            "W": "weight-constrained (weight limit reached first)"
+        },
+        "SVC_TYP_CD": {
+            "Economy": "economy service", "Standard": "standard service",
+            "Priority": "priority service"
+        }
+    },
+
+    # -------------------------------------------------------------------
+    # ENTITIES: business concepts mapped to physical columns
     # -------------------------------------------------------------------
     "entities": {
         "Shipment": {
             "description": "A freight shipment moving from an origin to a destination",
-            "source_table": "shipments.csv",
+            "source_table": "shpmt_mstr",
             "properties": {
-                "shipment_id": "unique identifier (e.g., SHP_00001)",
-                "customer_id": "customer who tendered the shipment",
-                "origin_terminal": "terminal where shipment originates",
-                "destination_terminal": "terminal where shipment is delivered",
-                "service_type": "Economy, Standard, or Priority",
-                "weight_lbs": "shipment weight in pounds",
-                "cube_ft": "shipment volume in cubic feet",
-                "revenue": "revenue in dollars"
+                "SHPMT_NBR": "shipment number — unique identifier",
+                "CUST_CD": "customer code",
+                "ORIG_TRML_CD": "origin terminal code (see terminal_codes)",
+                "DEST_TRML_CD": "destination terminal code (see terminal_codes)",
+                "SVC_TYP_CD": "service type code",
+                "TOT_WGT_LB": "total shipment weight, pounds",
+                "TOT_CUBE_FT": "total shipment volume, cubic feet",
+                "REV_AMT": "revenue, dollars",
+                "SHPMT_CRT_DT": "shipment CREATION date — administrative only; NEVER use for utilization time analysis"
             }
         },
         "Trailer": {
-            "description": "A physical trailer that carries shipments on a dispatch",
-            "source_table": "dispatches.csv (one row per trailer)",
+            "description": "A 28-foot pup trailer used in LTL linehaul. Dispatches typically move two pups as a double with one driver.",
+            "source_table": "lh_dsptch / trlr_util_fct (TRLR_NBR)",
             "properties": {
-                "trailer_id": "unique identifier (e.g., TRL_00001_1)",
-                "capacity_cube_ft": "2000 cubic feet (standard for this demo)",
-                "max_weight_lbs": "20000 pounds (regulatory/safety limit)"
+                "TRLR_NBR": "trailer number — unique identifier",
+                "TRLR_CAP_CUBE": "pup volume capacity, cubic feet (~2000 for a 28-ft pup)",
+                "WGT_LMT_LB": "PLANNING weight limit per pup, pounds (20000) — set by load planning to respect axle/GVW limits, not a per-trailer regulation"
             }
         },
         "Dispatch": {
-            "description": "A linehaul movement event: one driver moving trailer(s) from one terminal to another",
-            "source_table": "dispatches.csv",
+            "description": "A linehaul movement event: one driver moving a double (typically two pups) between terminals",
+            "source_table": "lh_dsptch",
             "properties": {
-                "dispatch_id": "unique identifier",
-                "origin_terminal": "starting terminal",
-                "destination_terminal": "ending terminal",
-                "driver_id": "driver operating the dispatch (attribute, not an entity)",
-                "shipment_ids": "comma-separated list of shipments loaded in this trailer"
+                "DSPTCH_NBR": "dispatch number",
+                "ORIG_TRML_CD": "origin terminal code",
+                "DEST_TRML_CD": "destination terminal code",
+                "DRVR_ID": "driver (attribute of the dispatch, not an entity)",
+                "LH_DSPTCH_DT": "dispatch departure date — the AUTHORITATIVE event time for utilization",
+                "SHPMT_NBR_LST": "comma-separated shipment numbers loaded in this trailer"
             }
         },
         "Terminal": {
-            "description": "A physical freight terminal / hub location",
-            "source_table": "derived from origin_terminal / destination_terminal columns",
+            "description": "A physical freight terminal, stored as a 3-letter code",
+            "source_table": "ORIG_TRML_CD / DEST_TRML_CD columns; decode via terminal_codes",
             "properties": {
-                "terminal_name": "Harrison, Springfield, Saint_Louis, Memphis, Atlanta"
+                "code": "HAR, SGF, STL, MEM, ATL — see code_decodes.terminal_codes"
             }
         },
         "Lane": {
-            "description": "A directed origin-destination terminal pair (e.g., Harrison -> Springfield). Lanes are directional: A->B is a different lane than B->A.",
-            "source_table": "derived: (origin_terminal, destination_terminal)",
+            "description": "A DIRECTED origin-destination terminal pair (HAR->SGF is a different lane than SGF->HAR)",
+            "source_table": "derived: (ORIG_TRML_CD, DEST_TRML_CD)",
             "properties": {
-                "origin_terminal": "lane start",
-                "destination_terminal": "lane end"
+                "ORIG_TRML_CD": "lane start code",
+                "DEST_TRML_CD": "lane end code"
+            }
+        },
+        "Time": {
+            "description": "Calendar time. LH_DSPTCH_DT is the AUTHORITATIVE event time for utilization (the trailer moved when it moved); SHPMT_CRT_DT is only when the shipment record was created.",
+            "source_table": "LH_DSPTCH_DT in trlr_util_fct / lh_dsptch",
+            "properties": {
+                "LH_DSPTCH_DT": "dispatch date (authoritative for utilization)",
+                "week": "ISO week, Monday through Sunday"
             }
         }
     },
 
     # -------------------------------------------------------------------
-    # RELATIONSHIPS
+    # RELATIONSHIPS with join logic on physical columns
     # -------------------------------------------------------------------
     "relationships": {
         "Shipment_loaded_in_Trailer": {
             "from_entity": "Shipment",
             "to_entity": "Trailer",
-            "description": "Shipments are physically loaded into a trailer (shipment_ids column in dispatches.csv)",
+            "description": "Shipments are loaded into a trailer",
             "cardinality": "many-to-one",
-            "join_logic": "dispatches.shipment_ids contains shipments.shipment_id"
+            "join_logic": "lh_dsptch.SHPMT_NBR_LST contains shpmt_mstr.SHPMT_NBR (comma-separated; split/UNNEST to join)"
         },
         "Trailer_part_of_Dispatch": {
             "from_entity": "Trailer",
             "to_entity": "Dispatch",
-            "description": "Each trailer row belongs to a dispatch; a dispatch can move multiple trailers with one driver",
+            "description": "Each lh_dsptch row is one trailer on a dispatch",
             "cardinality": "many-to-one",
-            "join_logic": "dispatches.trailer_id -> dispatches.dispatch_id"
+            "join_logic": "lh_dsptch.TRLR_NBR -> lh_dsptch.DSPTCH_NBR; trlr_util_fct.TRLR_NBR joins to lh_dsptch.TRLR_NBR"
         },
         "Dispatch_moves_on_Lane": {
             "from_entity": "Dispatch",
             "to_entity": "Lane",
-            "description": "A dispatch travels a lane defined by its origin and destination terminals",
+            "description": "A dispatch travels a lane",
             "cardinality": "many-to-one",
-            "join_logic": "GROUP BY (origin_terminal, destination_terminal)"
+            "join_logic": "GROUP BY (ORIG_TRML_CD, DEST_TRML_CD)"
+        },
+        "Dispatch_occurs_in_Time": {
+            "from_entity": "Dispatch",
+            "to_entity": "Time",
+            "description": "Time analysis of utilization is grouped on LH_DSPTCH_DT",
+            "cardinality": "many-to-one",
+            "join_logic": "trlr_util_fct.LH_DSPTCH_DT"
         },
         "Shipment_routes_through_Terminals": {
             "from_entity": "Shipment",
             "to_entity": "Terminal",
-            "description": "A shipment's planned movement is a sequence of legs through terminals (planned_movements.csv)",
+            "description": "A shipment's planned movement is a sequence of legs through terminals",
             "cardinality": "many-to-many",
-            "join_logic": "planned_movements.shipment_id = shipments.shipment_id, ordered by leg_number"
+            "join_logic": "pln_mvmt.SHPMT_NBR = shpmt_mstr.SHPMT_NBR, ordered by LEG_SEQ_NBR"
         }
     },
 
     # -------------------------------------------------------------------
-    # BUSINESS RULES: constraints and canonical formulas.
+    # BUSINESS RULES: the meaning the schema does not carry
     # -------------------------------------------------------------------
     "business_rules": {
-        "cube_utilization": {
-            "formula": "cube_utilization_pct = (sum of cube_ft of shipments in trailer / 2000) * 100",
-            "notes": "2000 cubic feet is the trailer capacity in this demo"
+        "column_authority_utilization": {
+            "rule": "UTIL_PCT_3 is the AUTHORITATIVE utilization column. UTIL_PCT_1 is cube-only utilization; UTIL_PCT_2 is weight-only. ALWAYS use UTIL_PCT_3 for any ranking, average, or comparison unless the user explicitly asks for cube-only or weight-only.",
+            "formula": "UTIL_PCT_3 = max(UTIL_PCT_1, UTIL_PCT_2)",
+            "rationale": "A pup is FULL when it hits EITHER limit — cubed out (volume) or weighed out (weight) — whichever comes first. A pup at 95% weight and 40% cube is ~95% utilized; it cannot take more freight."
         },
-        "weight_utilization": {
-            "formula": "weight_utilization_pct = (sum of weight_lbs of shipments in trailer / 20000) * 100",
-            "notes": "20000 lbs is the max legal/safe weight per trailer"
-        },
-        "actual_utilization": {
-            "formula": "actual_utilization_pct = max(cube_utilization_pct, weight_utilization_pct)",
-            "rationale": "A trailer is FULL when it hits EITHER limit (volume or weight), whichever comes first. So effective utilization is the MAX of the two: a trailer at 95% weight and 40% cube is ~95% utilized (weighed out) — it cannot take more freight. ALWAYS use actual_utilization_pct when ranking or comparing utilization unless the user explicitly asks for cube-only or weight-only.",
-            "binding_constraint": "The binding_constraint column in cube_utilization.csv names which limit (cube or weight) is the one closer to 100%."
+        "temporal_attribution": {
+            "rule": "Attribute utilization to LH_DSPTCH_DT, NEVER SHPMT_CRT_DT. Weeks run Monday through Sunday. 'Last week' = the most recent COMPLETE week before the current week. State the period boundaries used."
         },
         "lane_definition": {
-            "rule": "A lane is the directed pair (origin_terminal, destination_terminal). Do NOT merge A->B with B->A.",
+            "rule": "A lane is the directed pair (ORIG_TRML_CD, DEST_TRML_CD). Do NOT merge A->B with B->A."
         },
         "ranking_direction": {
-            "rule": "Higher utilization is BETTER. 'Worst' lanes/trailers = LOWEST actual_utilization_pct. 'Best' = HIGHEST. Double-check sort direction before answering."
+            "rule": "Higher utilization is BETTER. 'Worst' = LOWEST UTIL_PCT_3. 'Best' = HIGHEST. Verify sort direction before answering."
+        },
+        "reported_utilization_exclusion": {
+            "rule": "REPORTED utilization EXCLUDES service-protection loads. A service-protection load is any trailer dispatched with a single shipment on board (SHPMT_CNT = 1) — cut to protect transit commitments regardless of fill. Per the 2019 Finance policy, these distort asset-efficiency reporting and are excluded from all REPORTED utilization figures. This rule exists ONLY here: no column, sample row, or naming convention reveals it.",
+            "applies_when": "the user asks for 'reported', 'official', or 'finance' utilization"
+        },
+        "terminal_name_resolution": {
+            "rule": "Users refer to terminals by NAME (Harrison, Springfield...); the data stores 3-letter CODES. Resolve names to codes via code_decodes.terminal_codes before filtering (e.g., Harrison -> ORIG_TRML_CD = 'HAR')."
         }
     },
 
     # -------------------------------------------------------------------
-    # METRIC DEFINITIONS with exact computation steps.
-    # The LLM must follow these steps literally.
+    # METRIC DEFINITIONS: exact computation steps on physical columns
     # -------------------------------------------------------------------
     "metrics": {
         "trailer_utilization": {
             "entities": ["Trailer"],
             "grain": "one row per trailer",
-            "source": "cube_utilization.csv (pre-computed)",
-            "columns": ["trailer_id", "actual_utilization_pct"],
+            "source": "trlr_util_fct (pre-computed)",
             "steps": [
-                "1. Read cube_utilization.csv",
-                "2. Each row already contains actual_utilization_pct per trailer",
-                "3. Report trailer_id with its actual_utilization_pct"
+                "1. Read trlr_util_fct",
+                "2. UTIL_PCT_3 is the authoritative per-trailer utilization",
+                "3. Report TRLR_NBR with UTIL_PCT_3"
             ]
         },
         "lane_utilization": {
             "entities": ["Lane", "Trailer"],
-            "grain": "one row per (origin_terminal, destination_terminal)",
-            "source": "cube_utilization.csv",
+            "grain": "one row per (ORIG_TRML_CD, DEST_TRML_CD)",
+            "source": "trlr_util_fct",
             "steps": [
-                "1. Read cube_utilization.csv",
-                "2. GROUP BY origin_terminal, destination_terminal",
-                "3. Compute AVG(actual_utilization_pct) per group; also report COUNT(trailer_id) as trailer count",
-                "4. To find WORST lanes: sort ascending by avg utilization (lowest first)",
-                "5. To find BEST lanes: sort descending (highest first)"
+                "1. Read trlr_util_fct",
+                "2. GROUP BY ORIG_TRML_CD, DEST_TRML_CD",
+                "3. AVG(UTIL_PCT_3) per group; COUNT(TRLR_NBR) as trailer count",
+                "4. WORST lanes: sort ascending. BEST: sort descending."
             ],
-            "sql_equivalent": "SELECT origin_terminal, destination_terminal, AVG(actual_utilization_pct) AS avg_util, COUNT(*) AS trailers FROM cube_utilization GROUP BY 1,2 ORDER BY avg_util ASC"
+            "sql_equivalent": "SELECT ORIG_TRML_CD, DEST_TRML_CD, AVG(UTIL_PCT_3) AS avg_util, COUNT(*) AS trailers FROM trlr_util_fct GROUP BY 1,2 ORDER BY avg_util ASC"
         },
         "volume_by_origin": {
             "entities": ["Shipment", "Terminal"],
-            "grain": "one row per origin_terminal",
-            "source": "shipments.csv",
+            "grain": "one row per ORIG_TRML_CD",
+            "source": "shpmt_mstr",
             "steps": [
-                "1. Read shipments.csv",
-                "2. GROUP BY origin_terminal",
-                "3. Compute SUM(cube_ft) as total volume, COUNT(shipment_id) as shipment count"
+                "1. Resolve the terminal name to its code (Harrison -> 'HAR')",
+                "2. Read shpmt_mstr; filter/GROUP BY ORIG_TRML_CD",
+                "3. SUM(TOT_CUBE_FT) as total volume; COUNT(SHPMT_NBR) as shipment count"
             ],
-            "sql_equivalent": "SELECT origin_terminal, SUM(cube_ft) AS total_cube, COUNT(*) AS shipments FROM shipments GROUP BY 1"
+            "sql_equivalent": "SELECT ORIG_TRML_CD, SUM(TOT_CUBE_FT) AS total_cube, COUNT(*) AS shipments FROM shpmt_mstr GROUP BY 1"
+        },
+        "utilization_trend": {
+            "entities": ["Trailer", "Time"],
+            "grain": "one row per week",
+            "source": "trlr_util_fct",
+            "steps": [
+                "1. Read trlr_util_fct; use LH_DSPTCH_DT (NEVER SHPMT_CRT_DT)",
+                "2. Assign each row to its week (Monday start; date_trunc('week', LH_DSPTCH_DT))",
+                "3. GROUP BY week; AVG(UTIL_PCT_3) and COUNT(TRLR_NBR)",
+                "4. Sort chronologically; state the direction of change"
+            ],
+            "sql_equivalent": "SELECT date_trunc('week', LH_DSPTCH_DT) AS wk, AVG(UTIL_PCT_3), COUNT(*) FROM trlr_util_fct GROUP BY 1 ORDER BY 1"
+        },
+        "reported_utilization": {
+            "entities": ["Trailer"],
+            "grain": "single number (optionally by lane or week)",
+            "source": "trlr_util_fct",
+            "steps": [
+                "1. Read trlr_util_fct",
+                "2. EXCLUDE service-protection loads: filter to SHPMT_CNT > 1 (per reported_utilization_exclusion)",
+                "3. AVG(UTIL_PCT_3) over the remaining rows",
+                "4. State how many loads were excluded"
+            ],
+            "sql_equivalent": "SELECT AVG(UTIL_PCT_3) AS reported_util, COUNT(*) AS loads_included FROM trlr_util_fct WHERE SHPMT_CNT > 1"
         },
         "shipments_on_trailer": {
             "entities": ["Shipment", "Trailer", "Dispatch"],
             "grain": "list of shipments for a given trailer",
-            "source": "dispatches.csv joined to shipments.csv",
+            "source": "lh_dsptch joined to shpmt_mstr",
             "steps": [
-                "1. Find the trailer's row in dispatches.csv",
-                "2. Split its shipment_ids column on commas",
-                "3. Look up each shipment_id in shipments.csv for details"
+                "1. Find the trailer's row in lh_dsptch",
+                "2. Split SHPMT_NBR_LST on commas (UNNEST(string_split(...)))",
+                "3. Join each number to shpmt_mstr.SHPMT_NBR for details"
             ]
         }
     },
 
     # -------------------------------------------------------------------
-    # QUERY PATTERNS: worked examples question -> computation.
+    # QUERY PATTERNS: question -> metric, with the trap called out
     # -------------------------------------------------------------------
     "query_patterns": [
         {
+            "question": "Rank the lanes by utilization (best to worst or worst to best)",
+            "metric": "lane_utilization",
+            "answer_shape": "Full ranked table of ALL lanes by AVG(UTIL_PCT_3) — NEVER UTIL_PCT_1 or UTIL_PCT_2 unless explicitly asked. Best = highest. State which column you ranked on."
+        },
+        {
+            "question": "What was utilization last week / in a specific week?",
+            "metric": "utilization_trend",
+            "answer_shape": "Apply temporal_attribution: Monday-Sunday weeks on LH_DSPTCH_DT; 'last week' = most recent COMPLETE week. State the exact date range, then AVG(UTIL_PCT_3) for rows in range."
+        },
+        {
+            "question": "What is our reported / official utilization?",
+            "metric": "reported_utilization",
+            "answer_shape": "Apply reported_utilization_exclusion FIRST (SHPMT_CNT > 1), then AVG(UTIL_PCT_3). State the excluded load count. A plain average over all loads is WRONG for 'reported' figures."
+        },
+        {
             "question": "Which lanes have the lowest/worst utilization?",
             "metric": "lane_utilization",
-            "answer_shape": "Table of lanes sorted ASCENDING by avg actual_utilization_pct, with trailer counts. Lowest number = worst."
+            "answer_shape": "Table of lanes sorted ASCENDING by AVG(UTIL_PCT_3), with trailer counts."
         },
         {
             "question": "What is the average utilization across all trailers?",
             "metric": "trailer_utilization",
-            "answer_shape": "Single number: AVG(actual_utilization_pct) over all rows of cube_utilization.csv"
+            "answer_shape": "Single number: AVG(UTIL_PCT_3) over all rows of trlr_util_fct"
         },
         {
-            "question": "How much volume originates from <terminal>?",
+            "question": "How much volume originates from <terminal name>?",
             "metric": "volume_by_origin",
-            "answer_shape": "SUM(cube_ft) from shipments.csv where origin_terminal = <terminal>"
+            "answer_shape": "Resolve name to code first; SUM(TOT_CUBE_FT) from shpmt_mstr where ORIG_TRML_CD = <code>"
+        },
+        {
+            "question": "How has utilization trended over time / week over week?",
+            "metric": "utilization_trend",
+            "answer_shape": "Chronological weeks with AVG(UTIL_PCT_3) and trailer counts, plus trend direction"
         },
         {
             "question": "What shipments moved on trailer <id>?",
             "metric": "shipments_on_trailer",
-            "answer_shape": "List of shipment_ids with origin, destination, weight, cube"
+            "answer_shape": "List of SHPMT_NBR values with origin, destination, weight, cube"
         }
     ]
 }
