@@ -52,7 +52,11 @@ if not api_key:
 
 st.sidebar.header("Configuration")
 if not api_key:
+    api_key = st.session_state.get("shared_api_key", "")
+if not api_key:
     api_key = st.sidebar.text_input("Anthropic API Key", type="password")
+if api_key:
+    st.session_state.shared_api_key = api_key  # share with other pages
 
 # ===============================================================
 # DELEGATED COMPUTATION: SQL extraction, validation gate, execution
@@ -76,9 +80,14 @@ def extract_sql(response_text):
     return None
 
 
+ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt"}
+
+
 def validate_sql(sql):
-    """Governance gate (step 4 of the production flow): read-only, single
-    statement, no DDL/DML. The LLM proposes; the platform disposes."""
+    """POC governance gate: read-only, single statement, no DDL/DML, comment
+    stripping, and a table ALLOWLIST. Honest scope: production adds SQL AST
+    validation (e.g., sqlglot), column allowlists, Unity Catalog entitlements,
+    row/column security, cost limits, and audit logging."""
     if not sql:
         return False, "No SQL query found in the response."
     body = sql.strip().rstrip(";").strip()
@@ -87,10 +96,18 @@ def validate_sql(sql):
     first_word = body.split(None, 1)[0].upper() if body.split() else ""
     if first_word not in ("SELECT", "WITH"):
         return False, f"Only SELECT queries are allowed (got '{first_word}')."
-    upper = re.sub(r"'[^']*'", "''", body).upper()  # ignore keywords inside string literals
+    scrub = re.sub(r"'[^']*'", "''", body)
+    scrub = re.sub(r"--[^\n]*", " ", scrub)
+    scrub = re.sub(r"/\*.*?\*/", " ", scrub, flags=re.DOTALL)
+    upper = scrub.upper()
     for kw in FORBIDDEN_SQL:
         if re.search(r"\b" + kw + r"\b", upper):
             return False, f"Forbidden keyword: {kw}."
+    ctes = set(m.lower() for m in re.findall(r"(?i)(?:WITH|,)\s*([a-zA-Z_][\w]*)\s+AS\s*\(", scrub))
+    refs = set(m.lower() for m in re.findall(r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", scrub))
+    unknown = refs - ALLOWED_TABLES - ctes
+    if unknown:
+        return False, f"Table(s) not on the allowlist: {', '.join(sorted(unknown))}."
     return True, body
 
 
@@ -184,7 +201,7 @@ PROD_FLOW_SVG = """
   <rect x="250" y="128" width="440" height="60" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
   <circle cx="275" cy="158" r="13" fill="#1c7ed6"/><text x="275" y="163" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">2</text>
   <text x="485" y="152" text-anchor="middle" font-size="14" font-weight="bold" fill="#0b4a8b">Orchestration retrieves the relevant ontology slice</text>
-  <text x="485" y="172" text-anchor="middle" font-size="12" fill="#0b4a8b">metric definitions + rules for THIS question (not all 500 metrics)</text>
+  <text x="485" y="172" text-anchor="middle" font-size="12" fill="#0b4a8b">production design — this POC sends its full (small) ontology, cached</text>
   <line x1="470" y1="188" x2="470" y2="214" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
   <!-- 3 -->
@@ -198,7 +215,196 @@ PROD_FLOW_SVG = """
   <rect x="250" y="304" width="440" height="60" rx="9" fill="#ffe3e3" stroke="#d62828" stroke-width="1.5"/>
   <circle cx="275" cy="334" r="13" fill="#d62828"/><text x="275" y="339" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">4</text>
   <text x="485" y="328" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a1010">Validation gate — the LLM proposes, the platform disposes</text>
-  <text x="485" y="348" text-anchor="middle" font-size="12" fill="#7a1010">read-only, allowed tables/columns, access control, single statement</text>
+  <text x="485" y="348" text-anchor="middle" font-size="12" fill="#7a1010">POC: read-only, single statement, table allowlist. Prod adds AST, entitlements, RLS</text>
+  <line x1="470" y1="364" x2="470" y2="390" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
+
+  <!-- 5 -->
+  <rect x="250" y="392" width="440" height="60" rx="9" fill="#d3f9d8" stroke="#2f9e44" stroke-width="1.5"/>
+  <circle cx="275" cy="422" r="13" fill="#2f9e44"/><text x="275" y="427" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">5</text>
+  <text x="485" y="416" text-anchor="middle" font-size="14" font-weight="bold" fill="#14521f">Engine computes — Databricks SQL / DuckDB in this demo</text>
+  <text x="485" y="436" text-anchor="middle" font-size="12" fill="#14521f">digit-perfect numbers; arithmetic errors structurally impossible</text>
+  <line x1="470" y1="452" x2="470" y2="478" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
+
+  <!-- 6 -->
+  <rect x="250" y="480" width="440" height="60" rx="9" fill="#f3f0ff" stroke="#845ef7" stroke-width="1.5"/>
+  <circle cx="275" cy="510" r="13" fill="#845ef7"/><text x="275" y="515" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">6</text>
+  <text x="485" y="504" text-anchor="middle" font-size="14" font-weight="bold" fill="#3b2a80">LLM narrates the result in business language</text>
+  <text x="485" y="524" text-anchor="middle" font-size="12" fill="#3b2a80">citing the metric definition applied (omitted in this demo to focus on query correctness)</text>
+
+  <!-- side annotations -->
+  <text x="115" y="250" text-anchor="middle" font-size="13" font-weight="bold" fill="#e6a700">LLM's job:</text>
+  <text x="115" y="268" text-anchor="middle" font-size="12" fill="#7a5800">interpretation</text>
+  <text x="822" y="420" text-anchor="middle" font-size="13" font-weight="bold" fill="#2f9e44">Engine's job:</text>
+  <text x="822" y="438" text-anchor="middle" font-size="12" fill="#14521f">computation</text>
+  <text x="115" y="330" text-anchor="middle" font-size="13" font-weight="bold" fill="#d62828">Platform's job:</text>
+  <text x="115" y="348" text-anchor="middle" font-size="12" fill="#7a1010">governance</text>
+
+  <defs>
+    <marker id="pa" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
+    </marker>
+  </defs>
+</svg>
+"""
+
+# ===============================================================
+# DELEGATED COMPUTATION: SQL extraction, validation gate, execution
+# The LLM interprets and writes the query; DuckDB computes.
+# ===============================================================
+FORBIDDEN_SQL = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+                 "ATTACH", "COPY", "PRAGMA", "INSTALL", "LOAD"]
+
+
+def extract_sql(response_text):
+    """Pull the SQL out of a ```sql fenced block; fall back to first SELECT/WITH."""
+    m = re.search(r"```sql\s*(.*?)```", response_text, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"```\s*((?:SELECT|WITH).*?)```", response_text, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r"\b(SELECT|WITH)\b.*", response_text, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(0).strip()
+    return None
+
+
+ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt"}
+
+
+def validate_sql(sql):
+    """POC governance gate: read-only, single statement, no DDL/DML, comment
+    stripping, and a table ALLOWLIST. Honest scope: production adds SQL AST
+    validation (e.g., sqlglot), column allowlists, Unity Catalog entitlements,
+    row/column security, cost limits, and audit logging."""
+    if not sql:
+        return False, "No SQL query found in the response."
+    body = sql.strip().rstrip(";").strip()
+    if ";" in body:
+        return False, "Multiple statements are not allowed."
+    first_word = body.split(None, 1)[0].upper() if body.split() else ""
+    if first_word not in ("SELECT", "WITH"):
+        return False, f"Only SELECT queries are allowed (got '{first_word}')."
+    scrub = re.sub(r"'[^']*'", "''", body)
+    scrub = re.sub(r"--[^\n]*", " ", scrub)
+    scrub = re.sub(r"/\*.*?\*/", " ", scrub, flags=re.DOTALL)
+    upper = scrub.upper()
+    for kw in FORBIDDEN_SQL:
+        if re.search(r"\b" + kw + r"\b", upper):
+            return False, f"Forbidden keyword: {kw}."
+    ctes = set(m.lower() for m in re.findall(r"(?i)(?:WITH|,)\s*([a-zA-Z_][\w]*)\s+AS\s*\(", scrub))
+    refs = set(m.lower() for m in re.findall(r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", scrub))
+    unknown = refs - ALLOWED_TABLES - ctes
+    if unknown:
+        return False, f"Table(s) not on the allowlist: {', '.join(sorted(unknown))}."
+    return True, body
+
+
+def run_sql(sql):
+    """Execute against the four registered tables; return (df, error)."""
+    try:
+        con = duckdb.connect()
+        con.register("shpmt_mstr", duck_shipments)
+        con.register("lh_dsptch", duck_dispatches)
+        con.register("trlr_util_fct", duck_utilization)
+        con.register("pln_mvmt", duck_movements)
+        df = con.execute(sql).df()
+        # round floats for readable, checkable output
+        for c in df.select_dtypes(include="float").columns:
+            df[c] = df[c].round(2)
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+
+def schema_description():
+    """Schemas + 3 sample rows per table. This is ALL the model sees of the
+    data in production mode — never the full rows."""
+    parts = []
+    for name, df in [("shpmt_mstr", duck_shipments), ("lh_dsptch", duck_dispatches),
+                     ("trlr_util_fct", duck_utilization),
+                     ("pln_mvmt", duck_movements)]:
+        cols = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns)
+        parts.append(f"TABLE {name}\n  columns: {cols}\n  sample rows:\n"
+                     f"{df.head(3).to_string(index=False)}")
+    return "\n\n".join(parts)
+
+
+# ===============================================================
+# ARCHITECTURE DIAGRAM (top of page, expandable)
+# ===============================================================
+ARCHITECTURE_SVG = """
+<svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+  <rect x="250" y="20" width="400" height="70" rx="10" fill="#d4a373" stroke="#8a5a2b" stroke-width="2"/>
+  <text x="450" y="48" text-anchor="middle" font-size="20" font-weight="bold" fill="#2d1b00">Claude (LLM)</text>
+  <text x="450" y="72" text-anchor="middle" font-size="13" fill="#2d1b00">Answers questions in natural language</text>
+
+  <line x1="450" y1="90" x2="450" y2="140" stroke="#555" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="465" y="120" font-size="12" fill="#333">reasons using</text>
+
+  <rect x="150" y="140" width="600" height="110" rx="10" fill="#a7c957" stroke="#4f772d" stroke-width="2"/>
+  <text x="450" y="168" text-anchor="middle" font-size="20" font-weight="bold" fill="#1a2e05">Semantic Ontology (Context Layer)</text>
+  <text x="450" y="192" text-anchor="middle" font-size="13" fill="#1a2e05">Entities: Shipment, Trailer, Dispatch, Terminal, Lane</text>
+  <text x="450" y="212" text-anchor="middle" font-size="13" fill="#1a2e05">Relationships + Business Rules + Exact Metric Formulas</text>
+  <text x="450" y="232" text-anchor="middle" font-size="13" fill="#1a2e05">e.g., actual_utilization = max(cube%, weight%) — trailer full at EITHER limit</text>
+
+  <line x1="450" y1="250" x2="450" y2="300" stroke="#555" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="465" y="280" font-size="12" fill="#333">grounded in</text>
+
+  <rect x="100" y="300" width="700" height="100" rx="10" fill="#8ecae6" stroke="#219ebc" stroke-width="2"/>
+  <text x="450" y="330" text-anchor="middle" font-size="20" font-weight="bold" fill="#032030">Gold Layer Data (KPI Tables)</text>
+  <text x="250" y="360" text-anchor="middle" font-size="13" fill="#032030">shpmt_mstr</text>
+  <text x="450" y="360" text-anchor="middle" font-size="13" fill="#032030">lh_dsptch</text>
+  <text x="650" y="360" text-anchor="middle" font-size="13" fill="#032030">trlr_util_fct</text>
+  <text x="450" y="385" text-anchor="middle" font-size="12" fill="#032030" font-style="italic">(built from bronze → silver → gold transformations)</text>
+
+  <path d="M 180 95 C 60 130, 60 260, 180 320" fill="none" stroke="#d62828" stroke-width="2.5" stroke-dasharray="7,5" marker-end="url(#arrowRed)"/>
+  <text x="18" y="200" font-size="13" fill="#d62828" font-weight="bold">Without ontology:</text>
+  <text x="18" y="218" font-size="12" fill="#d62828">Claude guesses from</text>
+  <text x="18" y="234" font-size="12" fill="#d62828">raw columns alone</text>
+
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#d62828"/>
+    </marker>
+  </defs>
+</svg>
+"""
+
+
+PROD_FLOW_SVG = """
+<svg viewBox="0 0 940 620" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="28" text-anchor="middle" font-size="18" font-weight="bold" fill="#212529">Production flow: delegated computation (interpretation vs computation)</text>
+
+  <!-- 1 -->
+  <rect x="290" y="48" width="360" height="52" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <circle cx="315" cy="74" r="13" fill="#212529"/><text x="315" y="79" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">1</text>
+  <text x="485" y="70" text-anchor="middle" font-size="14" font-weight="bold">User asks in natural language</text>
+  <text x="485" y="90" text-anchor="middle" font-size="12" fill="#495057">"What was the average utilization last week?"</text>
+  <line x1="470" y1="100" x2="470" y2="126" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
+
+  <!-- 2 -->
+  <rect x="250" y="128" width="440" height="60" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
+  <circle cx="275" cy="158" r="13" fill="#1c7ed6"/><text x="275" y="163" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">2</text>
+  <text x="485" y="152" text-anchor="middle" font-size="14" font-weight="bold" fill="#0b4a8b">Orchestration retrieves the relevant ontology slice</text>
+  <text x="485" y="172" text-anchor="middle" font-size="12" fill="#0b4a8b">production design — this POC sends its full (small) ontology, cached</text>
+  <line x1="470" y1="188" x2="470" y2="214" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
+
+  <!-- 3 -->
+  <rect x="250" y="216" width="440" height="60" rx="9" fill="#fff3bf" stroke="#e6a700" stroke-width="1.5"/>
+  <circle cx="275" cy="246" r="13" fill="#e6a700"/><text x="275" y="251" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">3</text>
+  <text x="485" y="240" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a5800">LLM interprets — generates the SQL query</text>
+  <text x="485" y="260" text-anchor="middle" font-size="12" fill="#7a5800">sees schemas only, never the data; never does arithmetic</text>
+  <line x1="470" y1="276" x2="470" y2="302" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
+
+  <!-- 4 -->
+  <rect x="250" y="304" width="440" height="60" rx="9" fill="#ffe3e3" stroke="#d62828" stroke-width="1.5"/>
+  <circle cx="275" cy="334" r="13" fill="#d62828"/><text x="275" y="339" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">4</text>
+  <text x="485" y="328" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a1010">Validation gate — the LLM proposes, the platform disposes</text>
+  <text x="485" y="348" text-anchor="middle" font-size="12" fill="#7a1010">POC: read-only, single statement, table allowlist. Prod adds AST, entitlements, RLS</text>
   <line x1="470" y1="364" x2="470" y2="390" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
   <!-- 5 -->
@@ -415,14 +621,6 @@ def kg_legend(mode="full"):
             'orange was traversed, grey was not.</span></div>',
             unsafe_allow_html=True)
 
-
-with st.expander("Interactive Knowledge Graph: the Ontology Behind the Scenes", expanded=False):
-    st.caption("This is the live semantic model — not a mockup. Drag nodes, zoom with scroll, "
-               "hover for definitions, computation steps, and join logic. Add an entity or metric "
-               "to ontology.py and it appears here. Five entities and four metrics for this POC — "
-               "a production ontology has hundreds, rendered and governed exactly the same way.")
-    kg_legend(mode="full")
-    render_kg(build_kg(), "kg_full.html")
 
 # ===============================================================
 # GROUND TRUTH COMPUTATIONS (pandas, no LLM)
@@ -834,8 +1032,8 @@ QUERY PATTERNS (map the question to the right metric):
     st.session_state.last_raw_prompt = f"[SYSTEM, cached]\n{raw_context}\n\n[USER]\n{user_query}"
     st.session_state.last_semantic_prompt = f"[SYSTEM, cached]\n{semantic_context}\n\n[USER]\n{user_query}"
 
-    st.caption("Controlled comparison — production architecture: both sides see SCHEMAS "
-               "ONLY (never the data), get the same model, question, instructions, and "
+    st.caption("Controlled comparison — production architecture: both sides see table "
+               "metadata plus 3 sample rows (never the full dataset), same model, question, instructions, and "
                "1,200-token budget. Each writes SQL; DuckDB executes it. The stable context "
                "(schemas + ontology) sits in the cached system prompt, as in production — "
                "watch the cache-read numbers under each answer after the first question. "
@@ -861,6 +1059,11 @@ QUERY PATTERNS (map the question to the right metric):
                 st.markdown("**Generated SQL:**")
                 st.code(sql_or_reason, language="sql")
                 result, err = run_sql(sql_or_reason)
+                if err is None:
+                    st.session_state[side_key + "_tables"] = sorted(
+                        set(m.lower() for m in re.findall(
+                            r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", sql_or_reason))
+                        & ALLOWED_TABLES)
                 if err:
                     st.error(f"Execution error (surfaced honestly — this is why the "
                              f"validation gate exists): {err}")
@@ -943,6 +1146,20 @@ QUERY PATTERNS (map the question to the right metric):
                         answer_lines.append(line)
                 answer_text = "\n".join(answer_lines)
 
+                TABLE_ENTITIES = {
+                    "shpmt_mstr": ["Shipment"],
+                    "lh_dsptch": ["Trailer", "Dispatch"],
+                    "trlr_util_fct": ["Trailer", "Lane"],
+                    "pln_mvmt": ["Shipment", "Terminal"],
+                }
+                sql_tables = st.session_state.get("sem_out_tables", [])
+                derived = []
+                for t in sql_tables:
+                    for e in TABLE_ENTITIES.get(t, []):
+                        if e not in derived:
+                            derived.append(e)
+                if derived:
+                    used_entities = derived
                 if not used_entities and user_query in PRESET_METRIC_MAP:
                     used_metric = PRESET_METRIC_MAP[user_query]
                     used_entities = ontology["metrics"][used_metric].get("entities", [])
@@ -960,7 +1177,10 @@ QUERY PATTERNS (map the question to the right metric):
     # -----------------------------------------------------------
     used_entities, used_rels, used_metric = st.session_state.get("traversal", ([], [], None))
     if used_entities:
-        st.header("Ontology Traversal for This Query")
+        st.header("Semantic Context Selected for This Query")
+        st.caption("Entities (orange) are DERIVED from the tables the executed SQL "
+                   "actually referenced — evidence, not self-report. The metric is the "
+                   "model's own declaration of which definition it followed.")
         kg_legend(mode="traversal")
         render_kg(build_kg(highlight_entities=used_entities,
                            highlight_relationships=used_rels,
@@ -1052,6 +1272,43 @@ QUERY PATTERNS (map the question to the right metric):
         stats3.metric("Total shipments", len(shipments))
         with st.expander("Full utilization table (for manual verification)"):
             st.dataframe(utilization, hide_index=True, use_container_width=True)
+
+# ===============================================================
+# TECHNICAL APPENDIX: architecture + the live semantic model
+# ===============================================================
+st.header("Technical Appendix")
+st.caption("The proof lives above; the plumbing lives here.")
+
+
+with st.expander("Interactive Knowledge Graph: the Ontology Behind the Scenes", expanded=False):
+    st.caption("This is the live semantic model — not a mockup. Drag nodes, zoom with scroll, "
+               "hover for definitions, computation steps, and join logic. Add an entity or metric "
+               "to ontology.py and it appears here. Five entities and four metrics for this POC — "
+               "a production ontology has hundreds, rendered and governed exactly the same way.")
+    kg_legend(mode="full")
+    render_kg(build_kg(), "kg_full.html")
+
+
+# ===============================================================
+# FROM INSIGHT TO ACTION (production pattern, illustrated)
+# ===============================================================
+with st.expander("From Insight to Action — where this goes next"):
+    st.markdown("""
+An accurate answer is the beginning, not the end. In production, the same ontology that
+defines the metric also carries **targets, owners, and playbooks**, so the answer arrives
+with its consequences attached. Illustrative (deterministic mock, same pattern as the
+live metrics):
+
+> **Springfield → Memphis reported utilization: below the 65% lane target.**
+> Of the loads dispatched, service-protection loads were excluded from the reported
+> figure per the Finance policy (owner: Finance — Asset Efficiency Reporting, effective
+> 2019). Accountable process: **linehaul load planning**. Playbook: schedule
+> consolidation review; departure-window adjustment.
+
+The ontology additions this requires are the same species as everything already in it:
+a `target` per metric per lane, an `owner`, and an `action` catalog — definitions, not
+technology.
+""")
 
 # ===============================================================
 # FOR DEVELOPERS: the mechanics
@@ -1268,8 +1525,9 @@ with st.expander("Why an Ontology? The Top Benefits (and the honest boundary)"):
 "Reported utilization excludes service-protection loads (SHPMT_CNT = 1), per the 2019
 Finance policy." No column name, sample row, or industry convention reveals this — it was
 decided in a meeting. *In this app:* the reported-utilization preset. The schema-only side
-computes a plain average and fails the verdict **every run, forever, on any model** — it is
-structurally unable to know the rule.
+computes a plain average and fails the verdict **by construction** — the rule cannot be
+inferred from schema, sample rows, or naming conventions, so no amount of model capability
+recovers it from the data alone.
 
 **2. Entities and relationships — correct joins, smaller search space.**
 The ontology declares what the objects are and how they link (Shipment →loaded in→ Trailer

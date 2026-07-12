@@ -166,8 +166,14 @@ ontology = {
             "rule": "Higher utilization is BETTER. 'Worst' = LOWEST UTIL_PCT_3. 'Best' = HIGHEST. Verify sort direction before answering."
         },
         "reported_utilization_exclusion": {
-            "rule": "REPORTED utilization EXCLUDES service-protection loads. A service-protection load is any trailer dispatched with a single shipment on board (SHPMT_CNT = 1) — cut to protect transit commitments regardless of fill. Per the 2019 Finance policy, these distort asset-efficiency reporting and are excluded from all REPORTED utilization figures. This rule exists ONLY here: no column, sample row, or naming convention reveals it.",
-            "applies_when": "the user asks for 'reported', 'official', or 'finance' utilization"
+            "rule": "REPORTED utilization EXCLUDES service-protection loads. A service-protection load is any trailer dispatched with a single shipment on board (SHPMT_CNT = 1) — cut to protect transit commitments regardless of fill. These distort asset-efficiency reporting and are excluded from all REPORTED utilization figures. This rule exists ONLY here: no column, sample row, or naming convention reveals it.",
+            "applies_when": "the user asks for 'reported', 'official', or 'finance' utilization",
+            "provenance": {
+                "owner": "Finance — Asset Efficiency Reporting",
+                "policy": "Linehaul Asset Reporting Policy",
+                "effective": "2019 (demo placeholder)",
+                "steward": "Decision Science (technical)"
+            }
         },
         "terminal_name_resolution": {
             "rule": "Users refer to terminals by NAME (Harrison, Springfield...); the data stores 3-letter CODES. Resolve names to codes via code_decodes.terminal_codes before filtering (e.g., Harrison -> ORIG_TRML_CD = 'HAR')."

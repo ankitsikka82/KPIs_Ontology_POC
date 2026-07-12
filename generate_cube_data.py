@@ -11,13 +11,19 @@ shipments = pd.DataFrame({
     'SHPMT_NBR': [f'SHP_{i:05d}' for i in range(1, num_shipments + 1)],
     'CUST_CD': np.random.choice([f'CUST_{i:03d}' for i in range(1, 21)], num_shipments),
     'ORIG_TRML_CD': np.random.choice(terminals, num_shipments),
-    'DEST_TRML_CD': np.random.choice(terminals, num_shipments),
+    'DEST_TRML_CD': '',  # filled below, guaranteed != origin
     'SVC_TYP_CD': np.random.choice(['Economy', 'Standard', 'Priority'], num_shipments),
     'TOT_WGT_LB': np.random.randint(500, 10000, num_shipments),
     'TOT_CUBE_FT': np.random.randint(50, 800, num_shipments),
     'REV_AMT': np.random.randint(500, 5000, num_shipments),
     'SHPMT_CRT_DT': [(datetime.now() - timedelta(days=int(np.random.randint(0, 56)))).date() for _ in range(num_shipments)]
 })
+
+# Guarantee destination != origin (no self-lanes)
+shipments['DEST_TRML_CD'] = [
+    np.random.choice([t for t in terminals if t != o])
+    for o in shipments['ORIG_TRML_CD']
+]
 
 planned_movements = []
 movement_id = 1
@@ -59,6 +65,7 @@ today = datetime.now().date()
 this_monday = today - timedelta(days=today.weekday())
 last_week_monday = this_monday - timedelta(days=7)
 
+assigned_shipments = set()
 for i in range(num_dispatches):
     origin = np.random.choice(terminals)
     destination = np.random.choice([t for t in terminals if t != origin])
@@ -71,12 +78,24 @@ for i in range(num_dispatches):
     if len(eligible_shipments) == 0:
         continue
 
+    # B-fix: never assign a shipment to more than one trailer globally
+    eligible_shipments = [s for s in eligible_shipments if s not in assigned_shipments]
+    if len(eligible_shipments) == 0:
+        continue
     num_in_dispatch = np.random.randint(2, 6)
     selected = np.random.choice(
         eligible_shipments,
         min(num_in_dispatch, len(eligible_shipments)),
         replace=False
     )
+    assigned_shipments.update(selected)
+
+    # A-fix: ONE date per dispatch, shared by both trailers (a dispatch is one
+    # movement event — one driver, one departure)
+    if dispatch_id <= 5:
+        dispatch_date = last_week_monday + timedelta(days=int(np.random.randint(0, 7)))
+    else:
+        dispatch_date = (datetime.now() - timedelta(days=int(np.random.randint(0, 56)))).date()
 
     # Split selected shipments across two trailers on this dispatch
     half = len(selected) // 2 if len(selected) > 1 else 1
@@ -91,9 +110,7 @@ for i in range(num_dispatches):
             'ORIG_TRML_CD': origin,
             'DEST_TRML_CD': destination,
             'DRVR_ID': f'DRV_{dispatch_id:03d}',
-            'LH_DSPTCH_DT': (last_week_monday + timedelta(days=int(np.random.randint(0, 7))))
-                             if dispatch_id <= 5 else
-                             (datetime.now() - timedelta(days=int(np.random.randint(0, 56)))).date(),
+            'LH_DSPTCH_DT': dispatch_date,
             'SHPMT_NBR_LST': ','.join(load)
         })
     dispatch_id += 1
