@@ -436,13 +436,71 @@ PROD_FLOW_SVG = """
 </svg>
 """
 
+
+RAG_FLOW_SVG = """
+<svg viewBox="0 0 940 560" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="28" text-anchor="middle" font-size="18" font-weight="bold" fill="#212529">RAG over the ontology: retrieve MEANING, not data</text>
+
+  <rect x="40" y="60" width="380" height="150" rx="10" fill="#f3f0ff" stroke="#845ef7" stroke-width="2"/>
+  <text x="230" y="86" text-anchor="middle" font-size="15" font-weight="bold" fill="#3b2a80">Ontology index (built once)</text>
+  <text x="230" y="110" text-anchor="middle" font-size="12" fill="#3b2a80">every metric, rule, pattern, entity = one chunk</text>
+  <text x="230" y="130" text-anchor="middle" font-size="12" fill="#3b2a80">embedded into vectors, stored in a vector index</text>
+  <text x="230" y="150" text-anchor="middle" font-size="12" fill="#3b2a80">POC: in-memory (fastembed) · Prod: Databricks</text>
+  <text x="230" y="170" text-anchor="middle" font-size="12" fill="#3b2a80">Vector Search over 1000s of definitions</text>
+  <text x="230" y="196" text-anchor="middle" font-size="11" font-style="italic" fill="#845ef7">the data tables are NOT in this index</text>
+
+  <rect x="520" y="60" width="380" height="70" rx="10" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="710" y="88" text-anchor="middle" font-size="14" font-weight="bold">User question</text>
+  <text x="710" y="112" text-anchor="middle" font-size="12" fill="#495057">"What is our reported utilization?"</text>
+
+  <line x1="710" y1="130" x2="710" y2="166" stroke="#555" stroke-width="2" marker-end="url(#ra)"/>
+  <rect x="520" y="168" width="380" height="56" rx="10" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
+  <text x="710" y="192" text-anchor="middle" font-size="13" font-weight="bold" fill="#0b4a8b">Embed the question, search the index</text>
+  <text x="710" y="212" text-anchor="middle" font-size="12" fill="#0b4a8b">top-k definition chunks by similarity</text>
+  <line x1="420" y1="135" x2="520" y2="190" stroke="#845ef7" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#rp)"/>
+
+  <line x1="710" y1="224" x2="710" y2="260" stroke="#555" stroke-width="2" marker-end="url(#ra)"/>
+  <rect x="480" y="262" width="440" height="76" rx="10" fill="#e6f4d7" stroke="#4f772d" stroke-width="1.5"/>
+  <text x="700" y="288" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2e05">Assemble the prompt</text>
+  <text x="700" y="308" text-anchor="middle" font-size="12" fill="#1a2e05">always-on core (decodes + authority + temporal rules)</text>
+  <text x="700" y="326" text-anchor="middle" font-size="12" fill="#1a2e05">+ retrieved slices + schemas — small, cached, targeted</text>
+
+  <line x1="700" y1="338" x2="700" y2="374" stroke="#555" stroke-width="2" marker-end="url(#ra)"/>
+  <rect x="480" y="376" width="440" height="56" rx="10" fill="#fff3bf" stroke="#e6a700" stroke-width="1.5"/>
+  <text x="700" y="400" text-anchor="middle" font-size="13" font-weight="bold" fill="#7a5800">LLM writes SQL from the retrieved definitions</text>
+  <text x="700" y="420" text-anchor="middle" font-size="12" fill="#7a5800">then: gate → engine computes → verdict (as before)</text>
+
+  <rect x="40" y="300" width="380" height="132" rx="10" fill="#fff" stroke="#d62828" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <text x="230" y="326" text-anchor="middle" font-size="13" font-weight="bold" fill="#d62828">What RAG here is NOT</text>
+  <text x="230" y="350" text-anchor="middle" font-size="12" fill="#7a1010">not retrieving data rows for the answer —</text>
+  <text x="230" y="368" text-anchor="middle" font-size="12" fill="#7a1010">numbers come from the warehouse via SQL</text>
+  <text x="230" y="392" text-anchor="middle" font-size="12" fill="#7a1010">phase 2: also retrieve POLICY provenance</text>
+  <text x="230" y="410" text-anchor="middle" font-size="12" fill="#7a1010">(the Finance memo paragraph behind the rule)</text>
+
+  <defs>
+    <marker id="ra" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
+    </marker>
+    <marker id="rp" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#845ef7"/>
+    </marker>
+  </defs>
+</svg>
+"""
+
 with st.expander("Architecture: How the Semantic Layer Works", expanded=True):
-    tab_a, tab_b = st.tabs(["The Context Layer", "Production Flow: Delegated Computation"])
+    tab_a, tab_b, tab_c = st.tabs(["The Context Layer", "Production Flow: Delegated Computation", "RAG over the Ontology"])
     with tab_a:
         components.html(ARCHITECTURE_SVG, height=680, scrolling=True)
         st.caption("Green layer is the difference: the ontology gives Claude entity definitions, "
                    "relationships, and exact metric formulas. The red dashed path is what happens "
                    "without it — Claude reasons from raw column names and guesses.")
+    with tab_c:
+        components.html(RAG_FLOW_SVG, height=620, scrolling=True)
+        st.caption("Live in this app: the 'RAG step' expander above the comparison shows "
+                   "the actual chunks retrieved for your question with similarity scores. "
+                   "Watch the semantic side's input tokens drop versus the full-ontology "
+                   "design — that reduction is what makes 500+ metrics economical.")
     with tab_b:
         components.html(PROD_FLOW_SVG, height=680, scrolling=True)
         st.markdown("""
@@ -620,6 +678,95 @@ def kg_legend(mode="full"):
             '<br><span style="font-size:13px;color:#868e96;">Two colors, one meaning: '
             'orange was traversed, grey was not.</span></div>',
             unsafe_allow_html=True)
+
+
+
+# ===============================================================
+# RAG OVER THE ONTOLOGY: retrieve MEANING, not data.
+# Core invariants (small: decodes + authority/temporal rules) always ship;
+# metrics, patterns, and institutional rules are RETRIEVED per question.
+# This is the hot-core + retrieved-tail production design at 500+ metrics.
+# ===============================================================
+CORE_RULES = ["column_authority_utilization", "temporal_attribution",
+              "lane_definition", "ranking_direction", "terminal_name_resolution"]
+
+
+def build_ontology_corpus():
+    """Each retrievable unit of meaning becomes a chunk: (id, kind, text)."""
+    chunks = []
+    for name, m in ontology.get("metrics", {}).items():
+        text = (f"METRIC {name} | grain: {m.get('grain','')} | steps: "
+                + " ".join(m.get("steps", []))
+                + f" | sql: {m.get('sql_equivalent','')}"
+                + f" | entities: {', '.join(m.get('entities', []))}")
+        chunks.append((f"metric:{name}", "metric", text))
+    for name, r in ontology.get("business_rules", {}).items():
+        if name in CORE_RULES:
+            continue  # core rules always ship; only the tail is retrieved
+        chunks.append((f"rule:{name}", "rule",
+                       f"BUSINESS RULE {name} | {r.get('rule','')} "
+                       f"{r.get('formula','')} | applies: {r.get('applies_when','')}"))
+    for i, qp in enumerate(ontology.get("query_patterns", [])):
+        chunks.append((f"pattern:{i}:{qp.get('metric','')}", "pattern",
+                       f"QUESTION PATTERN: {qp.get('question','')} -> metric "
+                       f"{qp.get('metric','')} | {qp.get('answer_shape','')}"))
+    for name, e in ontology.get("entities", {}).items():
+        props = "; ".join(f"{k}: {v}" for k, v in e.get("properties", {}).items())
+        chunks.append((f"entity:{name}", "entity",
+                       f"ENTITY {name} | {e.get('description','')} | {props}"))
+    return chunks
+
+
+@st.cache_resource
+def get_retriever():
+    """Dual engine: fastembed vectors if the model is available, else TF-IDF.
+    Both are in-memory vector indexes over ~25 chunks; production swaps this
+    for Databricks Vector Search over thousands of definitions."""
+    chunks = build_ontology_corpus()
+    texts = [c[2] for c in chunks]
+    try:
+        from fastembed import TextEmbedding
+        import numpy as np
+        model = TextEmbedding("BAAI/bge-small-en-v1.5")
+        vecs = np.array(list(model.embed(texts)))
+        vecs = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
+
+        def search(query, k=6):
+            qv = np.array(list(model.embed([query])))[0]
+            qv = qv / np.linalg.norm(qv)
+            sims = vecs @ qv
+            order = sims.argsort()[::-1][:k]
+            return [(chunks[i], float(sims[i])) for i in order]
+        return search, "fastembed (bge-small-en-v1.5, ONNX vectors)"
+    except Exception:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        vec = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True).fit(texts)
+        mat = vec.transform(texts)
+
+        def search(query, k=6):
+            qv = vec.transform([query])
+            sims = cosine_similarity(qv, mat)[0]
+            order = sims.argsort()[::-1][:k]
+            return [(chunks[i], float(sims[i])) for i in order]
+        return search, "TF-IDF fallback (lexical)"
+
+
+def assemble_semantic_slices(user_query, k=6):
+    """The RAG step: core invariants + retrieved tail for THIS question."""
+    search, engine = get_retriever()
+    hits = search(user_query, k=k)
+    retrieved_text = "\n\n".join(
+        f"[{cid}] (score {score:.3f})\n{text}" for (cid, kind, text), score in hits)
+    core = {name: ontology["business_rules"][name] for name in CORE_RULES
+            if name in ontology.get("business_rules", {})}
+    core_text = ("CODE DECODES (always included):\n"
+                 + json.dumps(ontology.get("code_decodes", {}), indent=2)
+                 + "\n\nCORE BUSINESS RULES (always included):\n"
+                 + json.dumps(core, indent=2)
+                 + "\n\nPHYSICAL TABLES:\n"
+                 + json.dumps(ontology.get("physical_tables", {}), indent=2))
+    return core_text, retrieved_text, hits, engine
 
 
 # ===============================================================
@@ -987,35 +1134,29 @@ fenced block. The system will execute it — do not fabricate result numbers.
 
 {SCHEMAS}"""
 
+    core_text, retrieved_text, rag_hits, rag_engine = assemble_semantic_slices(user_query)
+    st.session_state.rag_hits = rag_hits
+    st.session_state.rag_engine = rag_engine
+
     semantic_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
 
 Respond with ONE short sentence explaining your approach (naming the metric
-definition you followed), then the query in a ```sql fenced block. The system will execute
-it — do not fabricate result numbers.
+definition you followed), then the query in a ```sql fenced block. The system will
+execute it — do not fabricate result numbers.
 
-You additionally have access to a semantic ontology. Follow its metric
-definitions, canonical formulas, authoritative columns, and temporal rules EXACTLY.
+You additionally have access to a governed semantic ontology, provided as ALWAYS-ON
+core rules plus definitions RETRIEVED for this specific question. Follow them EXACTLY.
 
 BEGIN your response with ONE compact line in EXACTLY this format, then a blank
 line, then your explanation and query (the system parses and removes it):
 TRACE: metric=<one of: trailer_utilization, lane_utilization, volume_by_origin, shipments_on_trailer, utilization_trend, reported_utilization, NONE>; entities=<comma-separated from: Shipment, Trailer, Dispatch, Terminal, Lane, Time>
 
-ENTITIES:
-{json.dumps({k: v['description'] for k, v in ontology['entities'].items()}, indent=2)}
+{core_text}
 
-RELATIONSHIPS (with join logic):
-{json.dumps({k: {'link': f"{v['from_entity']} -> {v['to_entity']}", 'join': v.get('join_logic', '')} for k, v in ontology['relationships'].items()}, indent=2)}
-
-BUSINESS RULES (canonical formulas — never deviate):
-{json.dumps(ontology['business_rules'], indent=2)}
-
-METRIC DEFINITIONS (exact computation steps):
-{json.dumps(ontology['metrics'], indent=2)}
-
-QUERY PATTERNS (map the question to the right metric):
-{json.dumps(ontology['query_patterns'], indent=2)}
+RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology index):
+{retrieved_text}
 
 {SCHEMAS}"""
 
@@ -1042,6 +1183,17 @@ QUERY PATTERNS (map the question to the right metric):
                "The comparison is implicit semantics vs EXPLICIT governed semantics. "
                "Institutional rules (try the reported-utilization question) are where "
                "implicit hits its ceiling.")
+
+    with st.expander("RAG step: semantic context retrieved for this question"):
+        st.caption(f"Retrieval engine: {st.session_state.get('rag_engine', '')} — the "
+                   "vector index is over the ONTOLOGY's definitions, not the data. Core "
+                   "invariants (decodes, column authority, temporal rules) always ship; "
+                   "these chunks were retrieved for this question. At 500+ metrics this "
+                   "step is what keeps the prompt small — production swaps this in-memory "
+                   "index for Databricks Vector Search.")
+        for (cid, kind, text), score in st.session_state.get("rag_hits", []):
+            st.markdown(f"**`{cid}`** · similarity {score:.3f}")
+            st.caption(text[:300] + ("…" if len(text) > 300 else ""))
 
     col1, col2 = st.columns(2)
 

@@ -4,3 +4,5 @@ numpy
 anthropic
 pyvis
 duckdb
+fastembed
+scikit-learn
