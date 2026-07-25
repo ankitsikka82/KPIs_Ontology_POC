@@ -682,6 +682,11 @@ def build_ontology_corpus():
                 + f" | impact: {a.get('impact_formula','')} | owner: {a.get('owner','')}"
                 + f" | sql: {a.get('sql_equivalent','')}")
         chunks.append((f"action:{name}", "action", text))
+    for name, p in ontology.get("playbooks", {}).items():
+        text = (f"PLAYBOOK {name} | applies to: {' '.join(p.get('question_shapes', []))} "
+                f"| method: " + " ".join(p.get("method", []))
+                + f" | owner: {p.get('owner','')}")
+        chunks.append((f"playbook:{name}", "playbook", text))
     for name, e in ontology.get("entities", {}).items():
         props = "; ".join(f"{k}: {v}" for k, v in e.get("properties", {}).items())
         chunks.append((f"entity:{name}", "entity",
@@ -786,6 +791,58 @@ def find_consolidations():
     return pd.DataFrame(eligible), pd.DataFrame(rejected)
 
 
+def utilization_diagnostic():
+    """Root-cause decomposition + greedy re-pack counterfactual (planning
+    estimate — not an optimizer; departure windows/doors/hours unmodeled)."""
+    u = utilization.copy()
+    weighed_out = u[u['CNSTRNT_CD'] == 'W']
+    service_prot = u[u['SHPMT_CNT'] == 1]
+    current_avg = u['UTIL_PCT_3'].mean()
+
+    # greedy first-fit-decreasing re-pack per lane-day over ELIGIBLE loads
+    merged_rows, moves = [], []
+    for (o, dd, dt), grp in u.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD', 'LH_DSPTCH_DT']):
+        elig = grp[(grp['SHPMT_CNT'] > 1)].copy()
+        if len(elig):
+            mask = elig['TRLR_NBR'].map(
+                lambda t: 'Priority' not in _trailer_services(t)).astype(bool)
+            elig = elig[mask]
+        inelig = grp.drop(elig.index)
+        bins = []
+        for _, r in elig.sort_values('LD_CUBE_FT', ascending=False).iterrows():
+            placed = False
+            for b in bins:
+                if b['cube'] + r['LD_CUBE_FT'] <= 2000 and b['wgt'] + r['LD_WGT_LB'] <= 20000:
+                    b['cube'] += r['LD_CUBE_FT']; b['wgt'] += r['LD_WGT_LB']
+                    b['members'].append(r['TRLR_NBR']); placed = True
+                    break
+            if not placed:
+                bins.append({'cube': r['LD_CUBE_FT'], 'wgt': r['LD_WGT_LB'],
+                             'members': [r['TRLR_NBR']]})
+        saved = len(elig) - len(bins)
+        if saved > 0:
+            lane = lane_ref[(lane_ref['ORIG_TRML_CD'] == o) & (lane_ref['DEST_TRML_CD'] == dd)]
+            usd = round(float(lane['LANE_MILES'].iloc[0] * lane['CPM_USD'].iloc[0]) * saved, 0) if not lane.empty else 0
+            moves.append({'lane': f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}",
+                          'date': dt, 'ran': len(grp), 'needed': len(bins) + len(inelig),
+                          'moves_saved': saved, 'est_saving_usd': usd,
+                          'merge': "; ".join("+".join(b['members']) for b in bins if len(b['members']) > 1)})
+        for b in bins:
+            merged_rows.append(max(round(b['cube'] / 2000 * 100, 1),
+                                   round(b['wgt'] / 20000 * 100, 1)))
+        for _, r in inelig.iterrows():
+            merged_rows.append(r['UTIL_PCT_3'])
+    achievable_avg = sum(merged_rows) / len(merged_rows) if merged_rows else current_avg
+    return {
+        'current': round(current_avg, 1), 'achievable': round(achievable_avg, 1),
+        'uplift': round(achievable_avg - current_avg, 1),
+        'moves': pd.DataFrame(moves),
+        'total_usd': int(sum(m['est_saving_usd'] for m in moves)),
+        'weighed_out_n': len(weighed_out), 'weighed_out_avg_cube': round(weighed_out['UTIL_PCT_1'].mean(), 1) if len(weighed_out) else 0,
+        'service_prot_n': len(service_prot), 'total_n': len(u),
+    }
+
+
 def find_frequency_candidates():
     """Low-fill high-frequency lanes, floored at 3 schedules to protect service."""
     lanes = (utilization.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'], as_index=False)
@@ -799,6 +856,30 @@ def find_frequency_candidates():
     cand['weekly_saving_usd'] = (cand['LANE_MILES'] * cand['CPM_USD']).round(0)
     return cand[['lane', 'avg_util', 'loads', 'SCHED_PER_WK', 'SVC_STD_DAYS',
                  'weekly_saving_usd']]
+
+# ===============================================================
+# CHAT SESSION: Claude is stateless — the orchestration layer (this
+# app, via session_state) owns conversation memory and replays the
+# last turns with each request. Same responsibility split as the
+# production five-layer chatbot design.
+# ===============================================================
+MAX_TURNS_IN_CONTEXT = 4
+
+
+def _turn_summary(text):
+    """Compact prior-turn answer: explanation + SQL, capped, TRACE stripped."""
+    lines = [l for l in text.splitlines() if not l.strip().startswith("TRACE:")]
+    return "\n".join(lines)[:700]
+
+
+def build_messages(side, user_query):
+    msgs = []
+    for turn in st.session_state.get("chat_turns", [])[-MAX_TURNS_IN_CONTEXT:]:
+        msgs.append({"role": "user", "content": turn["q"]})
+        msgs.append({"role": "assistant", "content": turn[side]})
+    msgs.append({"role": "user", "content": user_query})
+    return msgs
+
 
 # ===============================================================
 # GROUND TRUTH COMPUTATIONS (pandas, no LLM)
@@ -1055,6 +1136,28 @@ def truth_consolidation():
     return (text, table, None, facts)
 
 
+def truth_diagnostic():
+    dg = utilization_diagnostic()
+    text = (f"Diagnostic (decompose FIRST): current avg **{dg['current']}%** → achievable "
+            f"**{dg['achievable']}%** (+{dg['uplift']} pts) via "
+            f"{int(dg['moves']['moves_saved'].sum()) if len(dg['moves']) else 0} "
+            f"consolidation move(s), est. **${dg['total_usd']:,}**. Root cause split: "
+            f"{dg['weighed_out_n']} weighed-out loads (full at ~"
+            f"{dg['weighed_out_avg_cube']}% cube — density/pricing lever, NOT planning), "
+            f"{dg['service_prot_n']} service-protection loads (policy). Planning "
+            f"estimate — departure windows/doors/hours unmodeled.")
+    table = dg['moves'] if len(dg['moves']) else None
+    facts = [
+        ("Distinguishes weighed-out loads (cube not improvable by planning)",
+         [["weighed-out", "weighed out", "weight-constrained", "weighs out", "cnstrnt_cd = 'w'", "cnstrnt_cd='w'"]]),
+        ("Accounts for service-protection loads as policy, not failure",
+         [["service-protection", "shpmt_cnt = 1", "shpmt_cnt=1"]]),
+        ("Recommends consolidation of same-lane same-day eligible loads",
+         [["consolidat"]]),
+    ]
+    return (text, table, None, facts)
+
+
 PRESET_QUESTIONS = {
     "Which lanes have the worst utilization?": truth_lane_utilization,
     "What is the average utilization across all trailers?": truth_avg_utilization,
@@ -1067,6 +1170,7 @@ PRESET_QUESTIONS = {
     "What is our reported utilization?": truth_reported_utilization,
     "What is our overall reported utilization for lanes originating from Springfield?": truth_reported_sgf_lanes,
     "Where can we consolidate trailers this period to save cost?": truth_consolidation,
+    "Why is our utilization low and what can we do about it?": truth_diagnostic,
 }
 
 # Fallback traversal source when Claude's tags are missing or malformed:
@@ -1083,6 +1187,7 @@ PRESET_METRIC_MAP = {
     "What is our reported utilization?": "reported_utilization",
     "What is our overall reported utilization for lanes originating from Springfield?": "reported_utilization",
     "Where can we consolidate trailers this period to save cost?": "consolidation_opportunity",
+    "Why is our utilization low and what can we do about it?": "consolidation_opportunity",
 }
 
 
@@ -1303,12 +1408,50 @@ with _a2:
                    "standard (SVC_STD_DAYS).")
     else:
         st.info("No frequency candidates this period.")
+st.markdown("---")
+st.markdown("**Utilization Improvement Diagnostic** — root cause, then the move")
+_dg = utilization_diagnostic()
+_d1, _d2, _d3, _d4 = st.columns(4)
+_d1.metric("Current avg utilization", f"{_dg['current']}%")
+_d2.metric("Achievable (planning estimate)", f"{_dg['achievable']}%",
+           delta=f"+{_dg['uplift']} pts")
+_d3.metric("Moves saved", int(_dg['moves']['moves_saved'].sum()) if len(_dg['moves']) else 0)
+_d4.metric("Est. saving", f"${_dg['total_usd']:,}")
+st.caption(f"Root cause FIRST: of {_dg['total_n']} loads, {_dg['weighed_out_n']} are "
+           f"WEIGHED-OUT (full at ~{_dg['weighed_out_avg_cube']}% cube — freight "
+           f"density, a pricing/mix lever, NOT a planning failure) and "
+           f"{_dg['service_prot_n']} are service-protection (policy). The addressable "
+           f"gap is same-lane same-day loads that legally combine. The achievable "
+           f"figure is a greedy re-pack PLANNING ESTIMATE — departure windows, door "
+           f"capacity, and driver hours are unmodeled (departure timestamps: production "
+           f"data need). Network-wide tradeoffs escalate to formal optimization (MILP).")
+if len(_dg['moves']):
+    st.dataframe(_dg['moves'], hide_index=True, use_container_width=True)
+    st.success("Each merged pair frees a DISPATCH — driver + tractor + lane miles — "
+               "not just a trailer. Owner: Linehaul load planning.")
+
 st.caption("Roadmap levers (named, not yet implemented): head-haul/backhaul balancing, "
            "break-terminal vs direct routing, doubles pairing optimization — each is "
            "eligibility rules + an impact formula in the same ACTION layer, then a MILP "
            "when network-level tradeoffs demand true optimization.")
 
 st.header("Ask About Cube Utilization")
+_h1, _h2 = st.columns([4, 1])
+with _h1:
+    _n = len(st.session_state.get("chat_turns", []))
+    if _n:
+        with st.expander(f"Chat session: {_n} prior turn(s) in context "
+                         f"(last {MAX_TURNS_IN_CONTEXT} travel with each question)"):
+            for i, t in enumerate(st.session_state.chat_turns, 1):
+                st.markdown(f"**{i}. You:** {t['q']}")
+                st.caption(t['sem'][:200] + "…")
+    else:
+        st.caption("New chat session — follow-up questions carry context "
+                   "(e.g., ask about reported utilization, then 'break that down by lane').")
+with _h2:
+    if st.button("🔄 New chat", use_container_width=True):
+        st.session_state.chat_turns = []
+        st.rerun()
 
 if "selected_query" not in st.session_state:
     st.session_state.selected_query = ""
@@ -1475,7 +1618,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     model="claude-sonnet-4-5",
                     max_tokens=1200,
                     system=raw_system,
-                    messages=[{"role": "user", "content": user_query}]
+                    messages=build_messages("raw", user_query)
                 )
                 _render_side(st.container(), response_raw.content[0].text,
                              time.time() - t0, response_raw.usage, "raw_out")
@@ -1493,10 +1636,15 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     model="claude-sonnet-4-5",
                     max_tokens=1200,
                     system=semantic_system,
-                    messages=[{"role": "user", "content": user_query}]
+                    messages=build_messages("sem", user_query)
                 )
                 sem_elapsed = time.time() - t0
                 response_text = response_semantic.content[0].text
+                st.session_state.setdefault("chat_turns", []).append({
+                    "q": user_query,
+                    "raw": _turn_summary(response_raw.content[0].text),
+                    "sem": _turn_summary(response_text),
+                })
 
                 used_entities, used_rels, used_metric = [], [], None
                 answer_lines = []

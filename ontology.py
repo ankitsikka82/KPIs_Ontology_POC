@@ -286,6 +286,25 @@ ontology = {
     },
 
     # -------------------------------------------------------------------
+    # DIAGNOSTIC PLAYBOOKS: how the enterprise analyzes a problem —
+    # the analysis METHOD is institutional knowledge too.
+    # -------------------------------------------------------------------
+    "playbooks": {
+        "improve_cube_utilization": {
+            "question_shapes": ["why is utilization low", "how can we improve cube utilization", "how do we get more efficient"],
+            "method": [
+                "1. DECOMPOSE before recommending. Split loads by CNSTRNT_CD: weighed-out loads (W) are FULL at low cube — their cube% CANNOT be improved by planning; that is freight mix/density (commercial lever). Never recommend consolidation on weight-bound freight.",
+                "2. Set aside service-protection loads (SHPMT_CNT = 1): dispatched for service per policy — a cost of service, not a planning failure.",
+                "3. The ADDRESSABLE gap is same-lane same-day loads that could legally combine (consolidation eligibility rules) — count moves saved (a merged pair frees a dispatch: driver + tractor + miles).",
+                "4. Quantify the counterfactual: recompute average UTIL_PCT_3 with eligible merges executed — 'current X% -> achievable Y%'. Label it a PLANNING ESTIMATE: departure windows, door capacity, and driver hours are not modeled (departure timestamps are a production data need).",
+                "5. Persistent low-fill high-frequency lanes -> frequency_rationalization, floored at 3 schedules/week for service.",
+                "6. When tradeoffs become network-wide (schedule redesign, terminal balance), escalate to formal optimization (MILP) — same rules become its constraints."
+            ],
+            "owner": "Linehaul load planning (moves) / Network planning (frequency) / Pricing (density mix)"
+        }
+    },
+
+    # -------------------------------------------------------------------
     # QUERY PATTERNS: question -> metric, with the trap called out
     # -------------------------------------------------------------------
     "query_patterns": [
