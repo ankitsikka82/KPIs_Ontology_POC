@@ -791,10 +791,17 @@ def find_consolidations():
     return pd.DataFrame(eligible), pd.DataFrame(rejected)
 
 
-def utilization_diagnostic():
+def utilization_diagnostic(orig=None):
     """Root-cause decomposition + greedy re-pack counterfactual (planning
-    estimate — not an optimizer; departure windows/doors/hours unmodeled)."""
+    estimate — not an optimizer; departure windows/doors/hours unmodeled).
+    orig: optional terminal code to scope the analysis (e.g., 'HAR')."""
     u = utilization.copy()
+    if orig:
+        u = u[u['ORIG_TRML_CD'] == orig]
+    if len(u) == 0:
+        return {'current': 0, 'achievable': 0, 'uplift': 0, 'moves': pd.DataFrame(),
+                'total_usd': 0, 'weighed_out_n': 0, 'weighed_out_avg_cube': 0,
+                'service_prot_n': 0, 'total_n': 0}
     weighed_out = u[u['CNSTRNT_CD'] == 'W']
     service_prot = u[u['SHPMT_CNT'] == 1]
     current_avg = u['UTIL_PCT_3'].mean()
@@ -1296,6 +1303,53 @@ V3_STACK = """
 </svg>
 """
 
+
+def build_network_svg():
+    """The physical network, drawn from the live data: node size/edge width
+    scale with actual load counts, so the map stays truthful across regens."""
+    POS = {"SGF": (340, 120), "STL": (600, 85), "HAR": (280, 250),
+           "MEM": (520, 290), "ATL": (790, 330)}
+    flows = (utilization.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])
+             .size().reset_index(name='loads'))
+    pair_tot = {}
+    for _, r in flows.iterrows():
+        key = tuple(sorted([r['ORIG_TRML_CD'], r['DEST_TRML_CD']]))
+        pair_tot[key] = pair_tot.get(key, 0) + r['loads']
+    node_tot = {t: 0 for t in POS}
+    for (a, b), n in pair_tot.items():
+        node_tot[a] += n; node_tot[b] += n
+    edges = []
+    for (a, b), n in sorted(pair_tot.items(), key=lambda kv: -kv[1]):
+        x1, y1 = POS[a]; x2, y2 = POS[b]
+        w = 1.5 + min(n, 12) * 0.55
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2 - 7
+        edges.append(
+            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#74a2c7" '
+            f'stroke-width="{w:.1f}" stroke-opacity="0.55"/>'
+            f'<text x="{mx}" y="{my}" text-anchor="middle" font-size="11" '
+            f'fill="#40607a" font-weight="bold">{n}</text>')
+    nodes = []
+    for t, (x, y) in POS.items():
+        r = 20 + min(node_tot.get(t, 0), 30) * 0.5
+        hub = t == "SGF"
+        nodes.append(
+            f'<circle cx="{x}" cy="{y}" r="{r:.0f}" fill="{"#f3f0ff" if hub else "#fff"}" '
+            f'stroke="{"#845ef7" if hub else "#1c7ed6"}" stroke-width="{3 if hub else 2}"/>'
+            f'<text x="{x}" y="{y - 3}" text-anchor="middle" font-size="12" '
+            f'font-weight="bold" fill="#212529">{t}</text>'
+            f'<text x="{x}" y="{y + 12}" text-anchor="middle" font-size="10" '
+            f'fill="#495057">{TERMINAL_NAMES[t]}</text>')
+    return (
+        '<svg viewBox="0 0 940 400" xmlns="http://www.w3.org/2000/svg" '
+        'style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;'
+        'font-family:Helvetica,Arial,sans-serif;">'
+        '<text x="470" y="26" text-anchor="middle" font-size="16" font-weight="bold" '
+        'fill="#212529">The network in this app — 5 terminals, live load counts per lane pair</text>'
+        + "".join(edges) + "".join(nodes) +
+        '<text x="470" y="388" text-anchor="middle" font-size="11" font-style="italic" '
+        'fill="#868e96">Springfield (violet) is the break terminal — multi-leg freight routes '
+        'through it. Node size and edge width scale with actual loads in the data.</text></svg>')
+
 with st.expander("Start Here — What This App Is", expanded=True):
     st.markdown("""
 **The problem this app demonstrates.** Enterprise AI can query data fluently — but it
@@ -1326,12 +1380,34 @@ hostile — three utilization columns named UTIL_PCT_1/2/3, two competing date f
 coded terminals — because that is what real warehouses look like. Simplifications are
 disclosed in the appendix.
 
+""")
+    components.html(build_network_svg(), height=420, scrolling=True)
+    st.markdown("""
 **How it solves the problem.** Company meaning — definitions, institutional rules,
 eligible actions — is written ONCE in a governed ontology. For each question, the
 relevant slices are retrieved (RAG over the ontology, not the data), the AI writes SQL
 from them, a validation gate screens it, a database engine computes the numbers, and an
 automated verdict checks both answers against ground truth. The AI decides WHAT to
 compute; the engine does the arithmetic; the ontology supplies the meaning.
+
+---
+
+**How to use this app — pick your path:**
+
+🎯 **Executive (3 minutes).** Click the preset **"What is our reported utilization?"**
+Watch the same AI produce two different numbers, read the Verdict, then glance at the
+Action Panel's dollar figures. The whole argument is in that one screen.
+
+🚚 **Planner (5 minutes).** Ask **"How much volume originates from Harrison?"** When
+the assistant offers to check improvement opportunities for Harrison, click yes — then
+type a follow-up like *"which move should I do first?"* and watch the conversation
+carry the analysis. Also try **"Why is our utilization low and what can we do about
+it?"** and compare which side knows that weighed-out freight can't be fixed by planning.
+
+🔧 **Engineer (10 minutes).** Run any preset, open the **RAG step** expander to see
+which ontology slices were retrieved and why, check the cache-read token economics
+under each answer, then open the **Technical Appendix** for the architecture, the live
+knowledge graph, and the validation gate's honest scope.
 """)
 # ===============================================================
 # KPI DASHBOARD: the ANTICIPATED questions (traditional BI world)
@@ -1430,7 +1506,11 @@ if len(_dg['moves']):
     st.success("Each merged pair frees a DISPATCH — driver + tractor + lane miles — "
                "not just a trailer. Owner: Linehaul load planning.")
 
-st.caption("Roadmap levers (named, not yet implemented): head-haul/backhaul balancing, "
+st.caption("Roadmap levers (named, not yet implemented): PLAN-VS-ACTUAL ROUTING "
+           "VARIANCE — compare planned legs (pln_mvmt) against actual routes taken, "
+           "score each human override's outcome (better/worse cube), and learn from "
+           "good deviations; requires actual leg events + an override flag. Also: "
+           "head-haul/backhaul balancing, "
            "break-terminal vs direct routing, doubles pairing optimization — each is "
            "eligibility rules + an impact formula in the same ACTION layer, then a MILP "
            "when network-level tradeoffs demand true optimization.")
@@ -1542,6 +1622,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
     semantic_system = [{"type": "text", "text": semantic_context,
                         "cache_control": {"type": "ephemeral"}}]
 
+    st.session_state.last_user_query = user_query
     # Store both prompts so the developer section can show the real payloads
     st.session_state.last_raw_prompt = f"[SYSTEM, cached]\n{raw_context}\n\n[USER]\n{user_query}"
     st.session_state.last_semantic_prompt = f"[SYSTEM, cached]\n{semantic_context}\n\n[USER]\n{user_query}"
@@ -1556,6 +1637,34 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                "The comparison is implicit semantics vs EXPLICIT governed semantics. "
                "Institutional rules (try the reported-utilization question) are where "
                "implicit hits its ceiling.")
+    with st.expander("📖 Implicit vs Explicit Semantics — the one concept to take away"):
+        st.markdown("""
+**Implicit semantics** is everything the model absorbed about freight from training —
+thousands of schemas, KPI dictionaries, and logistics docs. When it sees UTIL_PCT_1/2/3
+it doesn't *know* which is authoritative; it *guesses* from industry patterns, and it is
+a very good guesser. Free, powerful, and improving with every model generation.
+
+**Explicit semantics** is meaning that is *written down and governed*: your definitions,
+with owners, versions, and provenance. Not smarter — *guaranteed*.
+
+| | Implicit (model priors) | Explicit (governed ontology) |
+|---|---|---|
+| Industry conventions ("the composite column", "dispatch date") | ✅ Usually guessed right | ✅ Guaranteed |
+| YOUR institutional rules (Finance exclusions, frequency floors, hold policies) | ❌ **Zero coverage — structurally, forever** | ✅ The only source |
+| Run-to-run consistency | 🎲 A coin flip that usually lands well | 📜 A contract |
+| Audit answer to "why this number?" | "The model inferred it" | Definition + owner + policy + version |
+
+**Why both sides sometimes tie:** on conventional questions, implicit semantics answers
+correctly for free — and this demo says so honestly. The ROI of an ontology concentrates
+on the definitions that are *yours*, because no model has ever trained on your company's
+internal policies and none ever will.
+
+**The strategic arrow:** implicit coverage *grows* with every model generation; your
+institutional knowledge stays at zero in every model, forever, unless you supply it.
+So the ties will get more common — and the value will concentrate *ever more* on the
+governed layer. The ontology is not a workaround for today's model weaknesses; it is
+the one part of the stack that better models can never replace.
+""")
 
     with st.expander("RAG step: semantic context retrieved for this question"):
         st.caption(f"Retrieval engine: {st.session_state.get('rag_engine', '')} — the "
@@ -1806,6 +1915,54 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
         stats3.metric("Total shipments", len(shipments))
         with st.expander("Full utilization table (for manual verification)"):
             st.dataframe(utilization, hide_index=True, use_container_width=True)
+
+# ===============================================================
+# CONVERSATIONAL ACTION OFFER: the assistant proposes the next step,
+# scoped to the question's context. Production: an MCP tool call
+# (get_diagnostic(scope)); here, orchestration invokes the engine.
+# ===============================================================
+_lq = st.session_state.get("last_user_query", "")
+if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trailer"]):
+    _NAME_TO_CODE = {v.lower(): k for k, v in TERMINAL_NAMES.items()}
+    _scope_code = None
+    for _nm, _cd in _NAME_TO_CODE.items():
+        if _nm in _lq.lower() or _cd.lower() in _lq.lower().split():
+            _scope_code = _cd
+            break
+    _scope_label = f" for {TERMINAL_NAMES[_scope_code]}-origin lanes" if _scope_code else " (network-wide)"
+    st.markdown("---")
+    st.markdown(f"💬 **Assistant:** Want me to check for improvement "
+                f"opportunities{_scope_label}?")
+    if st.button(f"🔍 Yes — analyze opportunities{_scope_label}"):
+        _sdg = utilization_diagnostic(orig=_scope_code)
+        if _sdg['total_n'] == 0:
+            st.info("No loads in that scope this period.")
+        else:
+            _o1, _o2, _o3, _o4 = st.columns(4)
+            _o1.metric("Scope avg utilization", f"{_sdg['current']}%")
+            _o2.metric("Achievable (planning est.)", f"{_sdg['achievable']}%",
+                       delta=f"+{_sdg['uplift']} pts")
+            _o3.metric("Moves saved",
+                       int(_sdg['moves']['moves_saved'].sum()) if len(_sdg['moves']) else 0)
+            _o4.metric("Est. saving", f"${_sdg['total_usd']:,}")
+            st.caption(f"Scope: {_sdg['total_n']} loads — {_sdg['weighed_out_n']} "
+                       f"weighed-out (density/pricing lever, not planning), "
+                       f"{_sdg['service_prot_n']} service-protection (policy). "
+                       f"Planning estimate; owner: Linehaul load planning.")
+            if len(_sdg['moves']):
+                st.dataframe(_sdg['moves'], hide_index=True, use_container_width=True)
+            st.session_state.setdefault("chat_turns", []).append({
+                "q": f"[assistant offer accepted] Improvement opportunities{_scope_label}",
+                "raw": f"Scoped diagnostic: {_sdg['current']}% current, "
+                       f"{_sdg['achievable']}% achievable, ${_sdg['total_usd']:,} est.",
+                "sem": f"Scoped diagnostic{_scope_label}: current {_sdg['current']}%, "
+                       f"achievable {_sdg['achievable']}% (+{_sdg['uplift']} pts), "
+                       f"{_sdg['weighed_out_n']} weighed-out, "
+                       f"{_sdg['service_prot_n']} service-protection, "
+                       f"est. saving ${_sdg['total_usd']:,}.",
+            })
+            st.caption("This analysis is now in the chat context — ask a follow-up "
+                       "about it below.")
 
 # ===============================================================
 # TECHNICAL APPENDIX: architecture + the live semantic model
