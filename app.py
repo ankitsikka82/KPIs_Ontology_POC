@@ -21,10 +21,11 @@ def load_data():
     shipments = pd.read_csv('shipments.csv')
     dispatches = pd.read_csv('dispatches.csv')
     utilization = pd.read_csv('cube_utilization.csv')
-    return shipments, dispatches, utilization
+    lane_ref = pd.read_csv('lane_ref.csv')
+    return shipments, dispatches, utilization, lane_ref
 
 
-shipments, dispatches, utilization = load_data()
+shipments, dispatches, utilization, lane_ref = load_data()
 
 # Copies with parsed dates for the SQL engine (legacy physical schema)
 duck_shipments = shipments.copy()
@@ -80,7 +81,7 @@ def extract_sql(response_text):
     return None
 
 
-ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt"}
+ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt", "lane_ref"}
 
 
 def validate_sql(sql):
@@ -119,6 +120,7 @@ def run_sql(sql):
         con.register("lh_dsptch", duck_dispatches)
         con.register("trlr_util_fct", duck_utilization)
         con.register("pln_mvmt", duck_movements)
+        con.register("lane_ref", lane_ref)
         df = con.execute(sql).df()
         # round floats for readable, checkable output
         for c in df.select_dtypes(include="float").columns:
@@ -134,7 +136,7 @@ def schema_description():
     parts = []
     for name, df in [("shpmt_mstr", duck_shipments), ("lh_dsptch", duck_dispatches),
                      ("trlr_util_fct", duck_utilization),
-                     ("pln_mvmt", duck_movements)]:
+                     ("pln_mvmt", duck_movements), ("lane_ref", lane_ref)]:
         cols = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns)
         parts.append(f"TABLE {name}\n  columns: {cols}\n  sample rows:\n"
                      f"{df.head(3).to_string(index=False)}")
@@ -269,7 +271,7 @@ def extract_sql(response_text):
     return None
 
 
-ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt"}
+ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt", "lane_ref"}
 
 
 def validate_sql(sql):
@@ -308,6 +310,7 @@ def run_sql(sql):
         con.register("lh_dsptch", duck_dispatches)
         con.register("trlr_util_fct", duck_utilization)
         con.register("pln_mvmt", duck_movements)
+        con.register("lane_ref", lane_ref)
         df = con.execute(sql).df()
         # round floats for readable, checkable output
         for c in df.select_dtypes(include="float").columns:
@@ -323,7 +326,7 @@ def schema_description():
     parts = []
     for name, df in [("shpmt_mstr", duck_shipments), ("lh_dsptch", duck_dispatches),
                      ("trlr_util_fct", duck_utilization),
-                     ("pln_mvmt", duck_movements)]:
+                     ("pln_mvmt", duck_movements), ("lane_ref", lane_ref)]:
         cols = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns)
         parts.append(f"TABLE {name}\n  columns: {cols}\n  sample rows:\n"
                      f"{df.head(3).to_string(index=False)}")
@@ -710,6 +713,12 @@ def build_ontology_corpus():
         chunks.append((f"pattern:{i}:{qp.get('metric','')}", "pattern",
                        f"QUESTION PATTERN: {qp.get('question','')} -> metric "
                        f"{qp.get('metric','')} | {qp.get('answer_shape','')}"))
+    for name, a in ontology.get("actions", {}).items():
+        text = (f"ACTION {name} | {a.get('description','')} | eligibility: "
+                + " ".join(a.get("eligibility", []))
+                + f" | impact: {a.get('impact_formula','')} | owner: {a.get('owner','')}"
+                + f" | sql: {a.get('sql_equivalent','')}")
+        chunks.append((f"action:{name}", "action", text))
     for name, e in ontology.get("entities", {}).items():
         props = "; ".join(f"{k}: {v}" for k, v in e.get("properties", {}).items())
         chunks.append((f"entity:{name}", "entity",
@@ -768,6 +777,65 @@ def assemble_semantic_slices(user_query, k=6):
                  + json.dumps(ontology.get("physical_tables", {}), indent=2))
     return core_text, retrieved_text, hits, engine
 
+
+
+
+# ===============================================================
+# ACTION ENGINES: deterministic opportunity surfacing with
+# feasibility screening (NOT an optimizer — the honest label)
+# ===============================================================
+def _trailer_services(trailer_id):
+    row = dispatches[dispatches['TRLR_NBR'] == trailer_id]
+    if row.empty:
+        return set()
+    sids = [s for s in row.iloc[0]['SHPMT_NBR_LST'].split(',') if s]
+    return set(shipments[shipments['SHPMT_NBR'].isin(sids)]['SVC_TYP_CD'])
+
+
+def find_consolidations():
+    """All same-lane same-day pairs, screened against every eligibility rule."""
+    from itertools import combinations
+    eligible, rejected = [], []
+    u = utilization
+    for (o, dd, dt), grp in u.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD', 'LH_DSPTCH_DT']):
+        if len(grp) < 2:
+            continue
+        for i, j in combinations(grp.index, 2):
+            a, b = u.loc[i], u.loc[j]
+            cube = a['LD_CUBE_FT'] + b['LD_CUBE_FT']
+            wgt = a['LD_WGT_LB'] + b['LD_WGT_LB']
+            lane = lane_ref[(lane_ref['ORIG_TRML_CD'] == o) & (lane_ref['DEST_TRML_CD'] == dd)]
+            saving = round(float(lane['LANE_MILES'].iloc[0] * lane['CPM_USD'].iloc[0]), 0) if not lane.empty else 0
+            rec = {'trailer_1': a['TRLR_NBR'], 'trailer_2': b['TRLR_NBR'],
+                   'lane': f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}",
+                   'date': dt, 'combined_cube': int(cube), 'combined_wgt': int(wgt),
+                   'est_saving_usd': saving}
+            if cube > 2000 or wgt > 20000:
+                rec['rejected_because'] = 'exceeds pup capacity'
+                rejected.append(rec); continue
+            if a['SHPMT_CNT'] <= 1 or b['SHPMT_CNT'] <= 1:
+                rec['rejected_because'] = 'service-protection load (never held)'
+                rejected.append(rec); continue
+            if 'Priority' in (_trailer_services(a['TRLR_NBR']) | _trailer_services(b['TRLR_NBR'])):
+                rec['rejected_because'] = 'Priority-hold rule (Priority freight never held)'
+                rejected.append(rec); continue
+            eligible.append(rec)
+    return pd.DataFrame(eligible), pd.DataFrame(rejected)
+
+
+def find_frequency_candidates():
+    """Low-fill high-frequency lanes, floored at 3 schedules to protect service."""
+    lanes = (utilization.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'], as_index=False)
+             .agg(avg_util=('UTIL_PCT_3', 'mean'), loads=('TRLR_NBR', 'count')))
+    lanes = lanes.merge(lane_ref, on=['ORIG_TRML_CD', 'DEST_TRML_CD'])
+    cand = lanes[(lanes['avg_util'] < 60) & (lanes['SCHED_PER_WK'] >= 5)].copy()
+    cand = cand[cand['SCHED_PER_WK'] - 1 >= 3]
+    cand['lane'] = cand.apply(lambda r: f"{TERMINAL_NAMES[r['ORIG_TRML_CD']]} → "
+                                        f"{TERMINAL_NAMES[r['DEST_TRML_CD']]}", axis=1)
+    cand['avg_util'] = cand['avg_util'].round(1)
+    cand['weekly_saving_usd'] = (cand['LANE_MILES'] * cand['CPM_USD']).round(0)
+    return cand[['lane', 'avg_util', 'loads', 'SCHED_PER_WK', 'SVC_STD_DAYS',
+                 'weekly_saving_usd']]
 
 # ===============================================================
 # GROUND TRUTH COMPUTATIONS (pandas, no LLM)
@@ -993,6 +1061,37 @@ def truth_reported_sgf_lanes():
     return (text, table, None, facts)
 
 
+def truth_consolidation():
+    elig, rej = find_consolidations()
+    freq_note = ""
+    if len(elig):
+        total = int(elig['est_saving_usd'].sum())
+        pair_txt = "; ".join(f"{r['trailer_1']}+{r['trailer_2']} on {r['lane']} "
+                             f"(${int(r['est_saving_usd']):,})" for _, r in elig.iterrows())
+        text = (f"Eligible consolidation pairs (ALL rules applied, including the "
+                f"Priority-hold screen): **{len(elig)}** — {pair_txt}. Est. total saving "
+                f"**${total:,}**.")
+    else:
+        text = "No eligible pairs this period."
+    if len(rej):
+        prio = rej[rej['rejected_because'].str.contains('Priority')]
+        if len(prio):
+            r0 = prio.iloc[0]
+            text += (f" NOTE: {r0['trailer_1']}+{r0['trailer_2']} on {r0['lane']} fits "
+                     f"physically but is REJECTED by the Priority-hold rule — invisible "
+                     f"without the shipment-level join.")
+    table = pd.concat([elig.assign(status='ELIGIBLE'),
+                       rej.assign(status='REJECTED')], ignore_index=True) if len(rej) else elig
+    facts = []
+    if len(elig):
+        for _, r in elig.iterrows():
+            facts.append((f"Identifies eligible pair {r['trailer_1']}+{r['trailer_2']}",
+                          [[r['trailer_1'].lower()], [r['trailer_2'].lower()]]))
+    facts.append(("Applies the Priority-hold screen (mentions Priority eligibility)",
+                  [["priority"]]))
+    return (text, table, None, facts)
+
+
 PRESET_QUESTIONS = {
     "Which lanes have the worst utilization?": truth_lane_utilization,
     "What is the average utilization across all trailers?": truth_avg_utilization,
@@ -1003,7 +1102,8 @@ PRESET_QUESTIONS = {
     "Rank all lanes by utilization, best to worst": truth_lane_ranking,
     "What was the average utilization last week?": truth_last_week,
     "What is our reported utilization?": truth_reported_utilization,
-    "What is our reported utilization for lanes originating from Springfield?": truth_reported_sgf_lanes,
+    "What is our overall reported utilization for lanes originating from Springfield?": truth_reported_sgf_lanes,
+    "Where can we consolidate trailers this period to save cost?": truth_consolidation,
 }
 
 # Fallback traversal source when Claude's tags are missing or malformed:
@@ -1018,7 +1118,8 @@ PRESET_METRIC_MAP = {
     "Rank all lanes by utilization, best to worst": "lane_utilization",
     "What was the average utilization last week?": "utilization_trend",
     "What is our reported utilization?": "reported_utilization",
-    "What is our reported utilization for lanes originating from Springfield?": "reported_utilization",
+    "What is our overall reported utilization for lanes originating from Springfield?": "reported_utilization",
+    "Where can we consolidate trailers this period to save cost?": "consolidation_opportunity",
 }
 
 
@@ -1046,6 +1147,97 @@ def check_facts(facts, response_text):
 # ===============================================================
 # QUESTION SELECTION: preset buttons + custom input
 # ===============================================================
+
+
+# ===============================================================
+# OPENING VISUALS: what this is, in ninety seconds
+# ===============================================================
+V1_PROBLEM = """
+<svg viewBox="0 0 940 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="30" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">The problem in one picture</text>
+  <rect x="330" y="50" width="280" height="46" rx="10" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="470" y="79" text-anchor="middle" font-size="14" font-weight="bold">"What is our reported utilization?"</text>
+  <line x1="400" y1="96" x2="230" y2="140" stroke="#555" stroke-width="2" marker-end="url(#v1a)"/>
+  <line x1="540" y1="96" x2="710" y2="140" stroke="#555" stroke-width="2" marker-end="url(#v1a)"/>
+  <rect x="80" y="142" width="300" height="70" rx="10" fill="#fff" stroke="#d62828" stroke-width="2"/>
+  <text x="230" y="168" text-anchor="middle" font-size="13" font-weight="bold" fill="#d62828">AI reads the schema alone</text>
+  <text x="230" y="192" text-anchor="middle" font-size="20" font-weight="bold" fill="#d62828">53.4%</text>
+  <rect x="560" y="142" width="300" height="70" rx="10" fill="#fff" stroke="#2b8a3e" stroke-width="2"/>
+  <text x="710" y="168" text-anchor="middle" font-size="13" font-weight="bold" fill="#2b8a3e">AI + governed company meaning</text>
+  <text x="710" y="192" text-anchor="middle" font-size="20" font-weight="bold" fill="#2b8a3e">65.6%</text>
+  <text x="470" y="248" text-anchor="middle" font-size="14" fill="#495057">Both queries ran successfully. Only one follows company policy.</text>
+  <text x="470" y="272" text-anchor="middle" font-size="13" font-style="italic" fill="#868e96">The model did not fail at SQL — the enterprise failed to provide the meaning.</text>
+  <defs><marker id="v1a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+</svg>
+"""
+
+V2_CONTRACT = """
+<svg viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="28" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">The semantic contract: author meaning once, enforce it everywhere</text>
+  <rect x="350" y="150" width="240" height="80" rx="12" fill="#f3f0ff" stroke="#845ef7" stroke-width="2.5"/>
+  <text x="470" y="182" text-anchor="middle" font-size="15" font-weight="bold" fill="#3b2a80">ONTOLOGY</text>
+  <text x="470" y="204" text-anchor="middle" font-size="11" fill="#3b2a80">entities · metrics · rules · actions</text>
+  <rect x="40" y="60" width="190" height="52" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
+  <text x="135" y="82" text-anchor="middle" font-size="12" font-weight="bold" fill="#0b4a8b">Prompt slices (RAG)</text>
+  <text x="135" y="100" text-anchor="middle" font-size="10" fill="#0b4a8b">vector index → LLM context</text>
+  <rect x="270" y="60" width="190" height="52" rx="9" fill="#e6f4d7" stroke="#4f772d" stroke-width="1.5"/>
+  <text x="365" y="82" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a2e05">Deterministic SQL</text>
+  <text x="365" y="100" text-anchor="middle" font-size="10" fill="#1a2e05">metrics + action engines</text>
+  <rect x="500" y="60" width="190" height="52" rx="9" fill="#fff3bf" stroke="#e6a700" stroke-width="1.5"/>
+  <text x="595" y="82" text-anchor="middle" font-size="12" font-weight="bold" fill="#7a5800">Property graph</text>
+  <text x="595" y="100" text-anchor="middle" font-size="10" fill="#7a5800">Neo4j · impact analysis</text>
+  <rect x="730" y="60" width="180" height="52" rx="9" fill="#ffe8e8" stroke="#d62828" stroke-width="1.5"/>
+  <text x="820" y="82" text-anchor="middle" font-size="12" font-weight="bold" fill="#7a1010">MCP tools (next)</text>
+  <text x="820" y="100" text-anchor="middle" font-size="10" fill="#7a1010">agents · KPI chatbot</text>
+  <line x1="420" y1="150" x2="150" y2="115" stroke="#845ef7" stroke-width="2" marker-end="url(#v2a)"/>
+  <line x1="450" y1="150" x2="370" y2="115" stroke="#845ef7" stroke-width="2" marker-end="url(#v2a)"/>
+  <line x1="510" y1="150" x2="580" y2="115" stroke="#845ef7" stroke-width="2" marker-end="url(#v2a)"/>
+  <line x1="545" y1="150" x2="800" y2="115" stroke="#845ef7" stroke-width="2" marker-end="url(#v2a)"/>
+  <rect x="330" y="280" width="280" height="50" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="470" y="300" text-anchor="middle" font-size="12" font-weight="bold" fill="#495057">Gold data layer</text>
+  <text x="470" y="318" text-anchor="middle" font-size="10" fill="#868e96">facts + lane reference (never in the LLM)</text>
+  <line x1="470" y1="280" x2="470" y2="232" stroke="#adb5bd" stroke-width="2" marker-end="url(#v2a)"/>
+  <defs><marker id="v2a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#845ef7"/></marker></defs>
+</svg>
+"""
+
+V3_STACK = """
+<svg viewBox="0 0 940 330" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="28" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">Tech design: every POC component has a named production target</text>
+  <text x="330" y="62" text-anchor="middle" font-size="13" font-weight="bold" fill="#868e96">THIS PROTOTYPE</text>
+  <text x="700" y="62" text-anchor="middle" font-size="13" font-weight="bold" fill="#2b8a3e">PRODUCTION (Databricks/Azure)</text>
+  <g font-size="12">
+    <rect x="150" y="80" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="102" text-anchor="middle">DuckDB in-process engine</text>
+    <rect x="560" y="80" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="102" text-anchor="middle">Databricks SQL warehouse</text>
+    <rect x="150" y="122" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="144" text-anchor="middle">In-memory vector index (fastembed)</text>
+    <rect x="560" y="122" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="144" text-anchor="middle">Databricks Vector Search</text>
+    <rect x="150" y="164" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="186" text-anchor="middle">ontology.py (versioned dict)</text>
+    <rect x="560" y="164" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="186" text-anchor="middle">Governed semantic store + Unity Catalog</text>
+    <rect x="150" y="206" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="228" text-anchor="middle">Regex gate + table allowlist</text>
+    <rect x="560" y="206" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="228" text-anchor="middle">SQL AST validation + entitlements + RLS</text>
+    <rect x="150" y="248" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="270" text-anchor="middle">Direct Claude API + prompt caching</text>
+    <rect x="560" y="248" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="270" text-anchor="middle">MCP tools over a governed metrics API</text>
+  </g>
+  <line x1="510" y1="97" x2="560" y2="97" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
+  <line x1="510" y1="139" x2="560" y2="139" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
+  <line x1="510" y1="181" x2="560" y2="181" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
+  <line x1="510" y1="223" x2="560" y2="223" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
+  <line x1="510" y1="265" x2="560" y2="265" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
+  <text x="470" y="316" text-anchor="middle" font-size="12" font-style="italic" fill="#868e96">Same architecture, bigger engines — nothing here requires inventing new technology.</text>
+  <defs><marker id="v3a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#2b8a3e"/></marker></defs>
+</svg>
+"""
+
+with st.expander("Start Here — What This App Is (90 seconds)", expanded=True):
+    v1, v2, v3 = st.tabs(["1 · The Problem", "2 · The Semantic Contract", "3 · Tech Design"])
+    with v1:
+        components.html(V1_PROBLEM, height=320)
+    with v2:
+        components.html(V2_CONTRACT, height=380)
+        st.caption("Meaning — including what actions are eligible and what they save — is "
+                   "authored once in the ontology and compiled to every consumer.")
+    with v3:
+        components.html(V3_STACK, height=350)
 
 # ===============================================================
 # KPI DASHBOARD: the ANTICIPATED questions (traditional BI world)
@@ -1080,6 +1272,47 @@ with _d2:
            .mean().round(2).sort_values().head(5))
     _ln.index = [f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}" for o, dd in _ln.index]
     st.bar_chart(_ln)
+
+
+# ===============================================================
+# ACTION PANEL: from measurement to governed action
+# ===============================================================
+st.header("Action Panel — governed opportunities this period")
+st.caption("Deterministic opportunity surfacing with feasibility screening (rules-based, "
+           "NOT an optimizer — that is the next rung). Eligibility rules, impact formulas, "
+           "and owners are defined in the ontology's ACTION layer, the same way metrics are.")
+
+_elig, _rej = find_consolidations()
+_freq = find_frequency_candidates()
+
+_a1, _a2 = st.columns(2)
+with _a1:
+    st.markdown("**Trailer consolidation** · owner: Linehaul load planning")
+    if len(_elig):
+        st.dataframe(_elig, hide_index=True, use_container_width=True)
+        st.success(f"{len(_elig)} eligible pair(s) — est. total saving "
+                   f"${int(_elig['est_saving_usd'].sum()):,} (one avoided pup move each)")
+    else:
+        st.info("No eligible pairs this period.")
+    if len(_rej):
+        with st.expander(f"Screened out by rule ({len(_rej)})"):
+            st.dataframe(_rej, hide_index=True, use_container_width=True)
+            st.caption("Physically feasible pairs rejected by INSTITUTIONAL rules — the "
+                       "Priority-hold screen requires the shipment-level join; it is "
+                       "invisible in the utilization fact alone.")
+with _a2:
+    st.markdown("**Schedule frequency review** · owner: Linehaul network planning")
+    if len(_freq):
+        st.dataframe(_freq, hide_index=True, use_container_width=True)
+        st.success("Candidate(s) below 60% fill at ≥5 schedules/week. Weekly saving per "
+                   "schedule removed; minimum-frequency floor of 3 protects the service "
+                   "standard (SVC_STD_DAYS).")
+    else:
+        st.info("No frequency candidates this period.")
+st.caption("Roadmap levers (named, not yet implemented): head-haul/backhaul balancing, "
+           "break-terminal vs direct routing, doubles pairing optimization — each is "
+           "eligibility rules + an impact formula in the same ACTION layer, then a MILP "
+           "when network-level tradeoffs demand true optimization.")
 
 st.header("Ask About Cube Utilization")
 
@@ -1148,6 +1381,9 @@ execute it — do not fabricate result numbers.
 
 You additionally have access to a governed semantic ontology, provided as ALWAYS-ON
 core rules plus definitions RETRIEVED for this specific question. Follow them EXACTLY.
+When a rule says EXCLUDE, implement it as a WHERE filter on the aggregation itself —
+reporting an excluded-count column while averaging over all rows is NOT compliance.
+When a retrieved metric provides sql_equivalent, adapt that SQL precisely.
 
 BEGIN your response with ONE compact line in EXACTLY this format, then a blank
 line, then your explanation and query (the system parses and removes it):
@@ -1303,6 +1539,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     "lh_dsptch": ["Trailer", "Dispatch"],
                     "trlr_util_fct": ["Trailer", "Lane"],
                     "pln_mvmt": ["Shipment", "Terminal"],
+                    "lane_ref": ["Lane"],
                 }
                 sql_tables = st.session_state.get("sem_out_tables", [])
                 derived = []
@@ -1314,7 +1551,8 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     used_entities = derived
                 if not used_entities and user_query in PRESET_METRIC_MAP:
                     used_metric = PRESET_METRIC_MAP[user_query]
-                    used_entities = ontology["metrics"][used_metric].get("entities", [])
+                    used_entities = ontology.get("metrics", {}).get(
+                        used_metric, {}).get("entities", ["Trailer", "Lane"])
 
                 _render_side(st.container(), answer_text, sem_elapsed,
                              response_semantic.usage, "sem_out",

@@ -158,6 +158,109 @@ for _, dispatch in dispatches_df.iterrows():
 
 utilization_df = pd.DataFrame(utilization_records)
 
+
+# ===============================================================
+# LANE REFERENCE (miles, cost, schedules, service standard)
+# ===============================================================
+lane_rows = []
+np.random.seed(77)
+_miles_seed = {}
+for o in terminals:
+    for dd in terminals:
+        if o == dd:
+            continue
+        key = tuple(sorted([o, dd]))
+        if key not in _miles_seed:
+            _miles_seed[key] = int(np.random.randint(180, 650))
+        miles = _miles_seed[key]
+        lane_rows.append({
+            'ORIG_TRML_CD': o, 'DEST_TRML_CD': dd,
+            'LANE_MILES': miles,
+            'CPM_USD': round(float(np.random.uniform(1.85, 2.30)), 2),
+            'SCHED_PER_WK': int(np.random.randint(3, 8)),
+            'SVC_STD_DAYS': 1 if miles < 400 else 2,
+        })
+lane_ref = pd.DataFrame(lane_rows)
+# frequency-rationalization seed: make SGF->MEM a high-frequency lane
+lane_ref.loc[(lane_ref['ORIG_TRML_CD'] == 'SGF') &
+             (lane_ref['DEST_TRML_CD'] == 'MEM'), 'SCHED_PER_WK'] = 6
+
+# ===============================================================
+# SEEDED SCENARIOS (deterministic, for the action layer)
+# ===============================================================
+def _mk_shipment(sid, o, dd, svc, wgt, cube, dt):
+    return {'SHPMT_NBR': sid, 'CUST_CD': f'CUST_{np.random.randint(100,999)}',
+            'ORIG_TRML_CD': o, 'DEST_TRML_CD': dd, 'SVC_TYP_CD': svc,
+            'TOT_WGT_LB': wgt, 'TOT_CUBE_FT': cube, 'REV_AMT': round(wgt * 0.11, 2),
+            'SHPMT_CRT_DT': dt}
+
+def _mk_trailer(tid, did, o, dd, dt, loads):
+    cube = sum(c for _, c in loads); wgt = sum(w for w, _ in loads)
+    cu = round(cube / 2000 * 100, 1); wu = round(wgt / 20000 * 100, 1)
+    return ({'DSPTCH_NBR': did, 'TRLR_NBR': tid, 'ORIG_TRML_CD': o,
+             'DEST_TRML_CD': dd, 'DRVR_ID': f'DRV_{np.random.randint(100,999)}',
+             'LH_DSPTCH_DT': dt, 'SHPMT_NBR_LST': ''},
+            {'TRLR_NBR': tid, 'DSPTCH_NBR': did, 'LH_DSPTCH_DT': dt,
+             'ORIG_TRML_CD': o, 'DEST_TRML_CD': dd, 'LD_CUBE_FT': cube,
+             'LD_WGT_LB': wgt, 'TRLR_CAP_CUBE': 2000, 'WGT_LMT_LB': 20000,
+             'UTIL_PCT_1': cu, 'UTIL_PCT_2': wu,
+             'CNSTRNT_CD': 'W' if wu > cu else 'C',
+             'UTIL_PCT_3': max(cu, wu), 'SHPMT_CNT': len(loads)})
+
+seed_date = (datetime.now() - timedelta(days=10)).date()
+extra_ship, extra_disp, extra_util = [], [], []
+
+# A. ELIGIBLE consolidation pair on HAR->ATL: fits cube+weight, no Priority
+pairA = [('TRLR_901', 'DISP_00901', [(5200, 430), (4100, 380)], ['Standard', 'Economy']),
+         ('TRLR_902', 'DISP_00902', [(4800, 410), (3900, 350)], ['Economy', 'Standard'])]
+sidn = 900
+for tid, did, loads, svcs in pairA:
+    d, u = _mk_trailer(tid, did, 'HAR', 'ATL', seed_date, loads)
+    sids = []
+    for (wgt, cube), svc in zip(loads, svcs):
+        sid = f'SHIP_{sidn:04d}'; sidn += 1
+        extra_ship.append(_mk_shipment(sid, 'HAR', 'ATL', svc, wgt, cube,
+                                       (seed_date - timedelta(days=2))))
+        sids.append(sid)
+    d['SHPMT_NBR_LST'] = ','.join(sids)
+    extra_disp.append(d); extra_util.append(u)
+
+# B. TRAP pair on STL->MEM: fits cube+weight BUT TRLR_912 carries a Priority
+#    shipment — ineligible under the priority-hold rule (invisible in trlr_util_fct)
+pairB = [('TRLR_911', 'DISP_00911', [(5600, 460), (3800, 300)], ['Standard', 'Economy']),
+         ('TRLR_912', 'DISP_00912', [(5100, 420), (4400, 360)], ['Priority', 'Standard'])]
+for tid, did, loads, svcs in pairB:
+    d, u = _mk_trailer(tid, did, 'STL', 'MEM', seed_date, loads)
+    sids = []
+    for (wgt, cube), svc in zip(loads, svcs):
+        sid = f'SHIP_{sidn:04d}'; sidn += 1
+        extra_ship.append(_mk_shipment(sid, 'STL', 'MEM', svc, wgt, cube,
+                                       (seed_date - timedelta(days=2))))
+        sids.append(sid)
+    d['SHPMT_NBR_LST'] = ','.join(sids)
+    extra_disp.append(d); extra_util.append(u)
+
+# C. Low-fill loads on the high-frequency SGF->MEM lane (frequency candidate)
+for i, days_ago in enumerate([9, 16, 23]):
+    dt = (datetime.now() - timedelta(days=days_ago)).date()
+    tid, did = f'TRLR_92{i}', f'DISP_0092{i}'
+    loads, svcs = [(3200, 380), (2400, 310)], ['Economy', 'Economy']
+    d, u = _mk_trailer(tid, did, 'SGF', 'MEM', dt, loads)
+    sids = []
+    for (wgt, cube), svc in zip(loads, svcs):
+        sid = f'SHIP_{sidn:04d}'; sidn += 1
+        extra_ship.append(_mk_shipment(sid, 'SGF', 'MEM', svc, wgt, cube,
+                                       (dt - timedelta(days=2))))
+        sids.append(sid)
+    d['SHPMT_NBR_LST'] = ','.join(sids)
+    extra_disp.append(d); extra_util.append(u)
+
+shipments = pd.concat([shipments, pd.DataFrame(extra_ship)], ignore_index=True)
+dispatches_df = pd.concat([dispatches_df, pd.DataFrame(extra_disp)], ignore_index=True)
+utilization_df = pd.concat([utilization_df, pd.DataFrame(extra_util)],
+                           ignore_index=True)
+lane_ref.to_csv('lane_ref.csv', index=False)
+
 shipments.to_csv('shipments.csv', index=False)
 planned_movements_df.to_csv('planned_movements.csv', index=False)
 dispatches_df.to_csv('dispatches.csv', index=False)

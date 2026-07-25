@@ -20,7 +20,8 @@ ontology = {
         "shpmt_mstr": "Shipment master — one row per shipment",
         "lh_dsptch": "Linehaul dispatch — one row per TRAILER on a dispatch (a dispatch can move 2 trailers with 1 driver)",
         "trlr_util_fct": "Trailer utilization fact — one row per trailer per dispatch, pre-computed utilization",
-        "pln_mvmt": "Planned movement — one row per routing leg per shipment"
+        "pln_mvmt": "Planned movement — one row per routing leg per shipment",
+        "lane_ref": "Lane reference — LANE_MILES, CPM_USD (cost per mile), SCHED_PER_WK, SVC_STD_DAYS per directed lane"
     },
 
     # -------------------------------------------------------------------
@@ -166,7 +167,7 @@ ontology = {
             "rule": "Higher utilization is BETTER. 'Worst' = LOWEST UTIL_PCT_3. 'Best' = HIGHEST. Verify sort direction before answering."
         },
         "reported_utilization_exclusion": {
-            "rule": "REPORTED utilization EXCLUDES service-protection loads. A service-protection load is any trailer dispatched with a single shipment on board (SHPMT_CNT = 1) — cut to protect transit commitments regardless of fill. These distort asset-efficiency reporting and are excluded from all REPORTED utilization figures. This rule exists ONLY here: no column, sample row, or naming convention reveals it.",
+            "rule": "REPORTED utilization EXCLUDES service-protection loads. A service-protection load is any trailer dispatched with a single shipment on board (SHPMT_CNT = 1). EXCLUDE means a WHERE filter: every reported figure MUST be computed over WHERE SHPMT_CNT > 1. Merely counting excluded loads in a separate column while averaging over ALL loads is NOT applying the exclusion and produces a WRONG reported number. These loads distort asset-efficiency reporting. This rule exists ONLY here: no column, sample row, or naming convention reveals it.",
             "applies_when": "the user asks for 'reported', 'official', or 'finance' utilization",
             "provenance": {
                 "owner": "Finance — Asset Efficiency Reporting",
@@ -254,6 +255,37 @@ ontology = {
     },
 
     # -------------------------------------------------------------------
+    # ACTIONS: governed operational levers. Eligibility rules and impact
+    # formulas are institutional decisions — the same species as metrics.
+    # -------------------------------------------------------------------
+    "actions": {
+        "consolidation_opportunity": {
+            "description": "Combine two same-lane, same-day trailer loads into one trailer, saving one linehaul move.",
+            "eligibility": [
+                "Same directed lane (ORIG_TRML_CD, DEST_TRML_CD) and same LH_DSPTCH_DT",
+                "Combined LD_CUBE_FT <= 2000 AND combined LD_WGT_LB <= 20000",
+                "Both loads have SHPMT_CNT > 1 (service-protection loads are dispatched for service, never held for consolidation)",
+                "PRIORITY-HOLD RULE: neither trailer may carry any Priority shipment (SVC_TYP_CD = 'Priority' via SHPMT_NBR_LST join to shpmt_mstr). Priority freight is never held or re-handled for consolidation. This is invisible in trlr_util_fct — it requires the shipment-level join."
+            ],
+            "impact_formula": "est_saving_usd = LANE_MILES * CPM_USD from lane_ref (one avoided pup move)",
+            "owner": "Linehaul load planning",
+            "provenance": {"policy": "Linehaul Consolidation Guidelines", "effective": "demo placeholder"},
+            "sql_equivalent": "SELECT a.TRLR_NBR AS trailer_1, b.TRLR_NBR AS trailer_2, a.ORIG_TRML_CD, a.DEST_TRML_CD, a.LH_DSPTCH_DT, a.LD_CUBE_FT + b.LD_CUBE_FT AS combined_cube, a.LD_WGT_LB + b.LD_WGT_LB AS combined_wgt, r.LANE_MILES * r.CPM_USD AS est_saving_usd FROM trlr_util_fct a JOIN trlr_util_fct b ON a.ORIG_TRML_CD = b.ORIG_TRML_CD AND a.DEST_TRML_CD = b.DEST_TRML_CD AND a.LH_DSPTCH_DT = b.LH_DSPTCH_DT AND a.TRLR_NBR < b.TRLR_NBR JOIN lane_ref r ON r.ORIG_TRML_CD = a.ORIG_TRML_CD AND r.DEST_TRML_CD = a.DEST_TRML_CD WHERE a.LD_CUBE_FT + b.LD_CUBE_FT <= 2000 AND a.LD_WGT_LB + b.LD_WGT_LB <= 20000 AND a.SHPMT_CNT > 1 AND b.SHPMT_CNT > 1  -- plus the Priority screen via SHPMT_NBR_LST/shpmt_mstr join; state which pairs it removes"
+        },
+        "frequency_rationalization": {
+            "description": "Reduce weekly schedule count on a persistently low-fill lane.",
+            "eligibility": [
+                "Lane average UTIL_PCT_3 below 60% over the analysis window",
+                "SCHED_PER_WK >= 5 currently",
+                "MINIMUM-FREQUENCY FLOOR: never below 3 schedules/week — protects the lane's SVC_STD_DAYS service standard. Utilization is optimized SUBJECT TO service, never at its expense."
+            ],
+            "impact_formula": "weekly_saving_usd = LANE_MILES * CPM_USD per schedule removed",
+            "owner": "Linehaul network planning",
+            "provenance": {"policy": "Network Frequency Guidelines", "effective": "demo placeholder"}
+        }
+    },
+
+    # -------------------------------------------------------------------
     # QUERY PATTERNS: question -> metric, with the trap called out
     # -------------------------------------------------------------------
     "query_patterns": [
@@ -266,6 +298,16 @@ ontology = {
             "question": "What was utilization last week / in a specific week?",
             "metric": "utilization_trend",
             "answer_shape": "Apply temporal_attribution: Monday-Sunday weeks on LH_DSPTCH_DT; 'last week' = most recent COMPLETE week. State the exact date range, then AVG(UTIL_PCT_3) for rows in range."
+        },
+        {
+            "question": "Where can we consolidate trailers / save cost / reduce empty space?",
+            "metric": "consolidation_opportunity (ACTION)",
+            "answer_shape": "Pairs of same-lane same-day trailers passing ALL eligibility rules including the Priority-hold screen, with combined cube/weight and est_saving_usd from lane_ref. Name any physically-fitting pair REJECTED by the Priority rule."
+        },
+        {
+            "question": "What is the reported utilization for lanes originating from (or filtered to) a specific terminal?",
+            "metric": "reported_utilization",
+            "answer_shape": "ONE overall number unless the user explicitly asks for a per-lane breakdown: resolve the terminal name to its code, then AVG(UTIL_PCT_3) over WHERE SHPMT_CNT > 1 AND ORIG_TRML_CD = <code>. The exclusion is a WHERE filter, never just a reported count."
         },
         {
             "question": "What is our reported / official utilization?",
