@@ -491,43 +491,6 @@ RAG_FLOW_SVG = """
 </svg>
 """
 
-with st.expander("Architecture: How the Semantic Layer Works", expanded=True):
-    tab_a, tab_b, tab_c = st.tabs(["The Context Layer", "Production Flow: Delegated Computation", "RAG over the Ontology"])
-    with tab_a:
-        components.html(ARCHITECTURE_SVG, height=680, scrolling=True)
-        st.caption("Green layer is the difference: the ontology gives Claude entity definitions, "
-                   "relationships, and exact metric formulas. The red dashed path is what happens "
-                   "without it — Claude reasons from raw column names and guesses.")
-    with tab_c:
-        components.html(RAG_FLOW_SVG, height=620, scrolling=True)
-        st.caption("Live in this app: the 'RAG step' expander above the comparison shows "
-                   "the actual chunks retrieved for your question with similarity scores. "
-                   "Watch the semantic side's input tokens drop versus the full-ontology "
-                   "design — that reduction is what makes 500+ metrics economical.")
-    with tab_b:
-        components.html(PROD_FLOW_SVG, height=680, scrolling=True)
-        st.markdown("""
-**Why this app delegates computation instead of letting the LLM calculate:**
-
-| | LLM computes (retired POC design) | LLM writes query, engine computes (this app) |
-|---|---|---|
-| Where the data lives | Pasted into the prompt (unrealistic at scale) | Stays in the warehouse; model sees only schemas + 3 sample rows |
-| Who does arithmetic | The LLM — a token predictor, not a calculator | DuckDB here; Databricks SQL in production |
-| Semantic errors (wrong column, grain, week) | Ontology reduces them | Ontology reduces them — same mechanism |
-| Arithmetic errors | Possible even with a correct approach | Structurally impossible |
-| Auditability | A paragraph of prose | The generated SQL — loggable, diffable, eval-able |
-
-**Real example from an earlier iteration of this demo** (before delegation, when the
-LLM computed inline over the then-current dataset of 24 trailers): asked for the average
-utilization (true value **54.06%** on that dataset), it answered **54.09%** — right
-column, right formula, right grain, but it slipped adding two dozen numbers in its head.
-That result is what motivated the switch to this architecture. The ontology fixes
-*meaning*, not *math*. Delegating the math to an engine eliminates that entire error
-class, and what remains — "did the model write the right query?" — is exactly what the
-ontology governs and exactly what you can eval at scale.
-""")
-
-
 # ===============================================================
 # INTERACTIVE KNOWLEDGE GRAPH (pyvis)
 # ===============================================================
@@ -1153,7 +1116,7 @@ def check_facts(facts, response_text):
 # OPENING VISUALS: what this is, in ninety seconds
 # ===============================================================
 V1_PROBLEM = """
-<svg viewBox="0 0 940 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+<svg viewBox="0 0 940 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
   <text x="470" y="30" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">The problem in one picture</text>
   <rect x="330" y="50" width="280" height="46" rx="10" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
   <text x="470" y="79" text-anchor="middle" font-size="14" font-weight="bold">"What is our reported utilization?"</text>
@@ -1172,7 +1135,7 @@ V1_PROBLEM = """
 """
 
 V2_CONTRACT = """
-<svg viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+<svg viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
   <text x="470" y="28" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">The semantic contract: author meaning once, enforce it everywhere</text>
   <rect x="350" y="150" width="240" height="80" rx="12" fill="#f3f0ff" stroke="#845ef7" stroke-width="2.5"/>
   <text x="470" y="182" text-anchor="middle" font-size="15" font-weight="bold" fill="#3b2a80">ONTOLOGY</text>
@@ -1202,7 +1165,7 @@ V2_CONTRACT = """
 """
 
 V3_STACK = """
-<svg viewBox="0 0 940 330" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
+<svg viewBox="0 0 940 330" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
   <text x="470" y="28" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">Tech design: every POC component has a named production target</text>
   <text x="330" y="62" text-anchor="middle" font-size="13" font-weight="bold" fill="#868e96">THIS PROTOTYPE</text>
   <text x="700" y="62" text-anchor="middle" font-size="13" font-weight="bold" fill="#2b8a3e">PRODUCTION (Databricks/Azure)</text>
@@ -1228,17 +1191,43 @@ V3_STACK = """
 </svg>
 """
 
-with st.expander("Start Here — What This App Is (90 seconds)", expanded=True):
-    v1, v2, v3 = st.tabs(["1 · The Problem", "2 · The Semantic Contract", "3 · Tech Design"])
-    with v1:
-        components.html(V1_PROBLEM, height=320)
-    with v2:
-        components.html(V2_CONTRACT, height=380)
-        st.caption("Meaning — including what actions are eligible and what they save — is "
-                   "authored once in the ontology and compiled to every consumer.")
-    with v3:
-        components.html(V3_STACK, height=350)
+with st.expander("Start Here — What This App Is", expanded=True):
+    st.markdown("""
+**The problem this app demonstrates.** Enterprise AI can query data fluently — but it
+does not automatically know which definition, date, code, or policy the company
+considers authoritative. That knowledge lives in memos and people, not schemas. The
+result: two technically valid queries, two different numbers, one business decision.
+""")
+    components.html(V1_PROBLEM, height=340, scrolling=True)
+    st.markdown(f"""
+**What is in this app** — four components, top to bottom:
 
+1. **KPI Dashboard** — the questions someone anticipated, computed directly from the
+   data: the traditional BI world.
+2. **Action Panel** — governed opportunities (trailer consolidation, schedule review)
+   surfaced by deterministic rules from the ontology's action layer, priced in dollars,
+   with owners.
+3. **The Assistant experiment** — the heart of the app: the SAME question answered two
+   ways by the same AI model, with and without the company's governed meaning, then
+   fact-checked against independently computed ground truth.
+4. **Technical Appendix** — architecture, the live knowledge graph, and developer
+   detail, for after the proof has landed.
+
+**The data underneath** — a realistic slice of LTL linehaul: **{len(utilization)}
+trailer loads** across **{utilization['ORIG_TRML_CD'].nunique()} terminals** and
+{len(lane_ref)} directed lanes over ~10 weeks, in four legacy fact tables plus a lane
+reference (miles, cost, schedules, service standards). The schema is deliberately
+hostile — three utilization columns named UTIL_PCT_1/2/3, two competing date fields,
+coded terminals — because that is what real warehouses look like. Simplifications are
+disclosed in the appendix.
+
+**How it solves the problem.** Company meaning — definitions, institutional rules,
+eligible actions — is written ONCE in a governed ontology. For each question, the
+relevant slices are retrieved (RAG over the ontology, not the data), the AI writes SQL
+from them, a validation gate screens it, a database engine computes the numbers, and an
+automated verdict checks both answers against ground truth. The AI decides WHAT to
+compute; the engine does the arithmetic; the ontology supplies the meaning.
+""")
 # ===============================================================
 # KPI DASHBOARD: the ANTICIPATED questions (traditional BI world)
 # ===============================================================
@@ -1280,7 +1269,12 @@ with _d2:
 st.header("Action Panel — governed opportunities this period")
 st.caption("Deterministic opportunity surfacing with feasibility screening (rules-based, "
            "NOT an optimizer — that is the next rung). Eligibility rules, impact formulas, "
-           "and owners are defined in the ontology's ACTION layer, the same way metrics are.")
+           "and owners are defined in the ontology's ACTION layer, the same way metrics are. "
+           "This panel RECOMPUTES from the data on every load — it looks unchanged here only "
+           "because the demo dataset is fixed; against live gold tables it is a living "
+           "morning report. For the PROMPTED path, ask the assistant below: 'Where can we "
+           "consolidate trailers this period to save cost?' — same rules, conversational "
+           "delivery.")
 
 _elig, _rej = find_consolidations()
 _freq = find_frequency_candidates()
@@ -1457,7 +1451,9 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                              f"validation gate exists): {err}")
                     st.session_state[side_key] = explanation + "\n" + sql_or_reason
                 else:
-                    st.markdown("**Executed result (computed by DuckDB, not the LLM):**")
+                    st.markdown("**Executed result** — Claude wrote this SQL (the decision); "
+                                "the DuckDB engine ran it (the arithmetic; production: "
+                                "Databricks SQL):")
                     st.dataframe(result, hide_index=True, use_container_width=True)
                     st.session_state[side_key] = (explanation + "\n" + sql_or_reason
                                                   + "\n" + result.to_string(index=False))
@@ -1679,8 +1675,49 @@ with st.expander("Interactive Knowledge Graph: the Ontology Behind the Scenes", 
     render_kg(build_kg(), "kg_full.html")
 
 
-# ===============================================================
-# FROM INSIGHT TO ACTION (production pattern, illustrated)
+with st.expander("Architecture: How the Semantic Layer Works", expanded=False):
+    tab_a, tab_b, tab_c, tab_d, tab_e = st.tabs(["The Context Layer", "Production Flow: Delegated Computation", "RAG over the Ontology", "The Semantic Contract", "POC → Production Stack"])
+    with tab_a:
+        components.html(ARCHITECTURE_SVG, height=680, scrolling=True)
+        st.caption("Green layer is the difference: the ontology gives Claude entity definitions, "
+                   "relationships, and exact metric formulas. The red dashed path is what happens "
+                   "without it — Claude reasons from raw column names and guesses.")
+    with tab_c:
+        components.html(RAG_FLOW_SVG, height=620, scrolling=True)
+        st.caption("Live in this app: the 'RAG step' expander above the comparison shows "
+                   "the actual chunks retrieved for your question with similarity scores. "
+                   "Watch the semantic side's input tokens drop versus the full-ontology "
+                   "design — that reduction is what makes 500+ metrics economical.")
+    with tab_b:
+        components.html(PROD_FLOW_SVG, height=680, scrolling=True)
+        st.markdown("""
+**Why this app delegates computation instead of letting the LLM calculate:**
+
+| | LLM computes (retired POC design) | LLM writes query, engine computes (this app) |
+|---|---|---|
+| Where the data lives | Pasted into the prompt (unrealistic at scale) | Stays in the warehouse; model sees only schemas + 3 sample rows |
+| Who does arithmetic | The LLM — a token predictor, not a calculator | DuckDB here; Databricks SQL in production |
+| Semantic errors (wrong column, grain, week) | Ontology reduces them | Ontology reduces them — same mechanism |
+| Arithmetic errors | Possible even with a correct approach | Structurally impossible |
+| Auditability | A paragraph of prose | The generated SQL — loggable, diffable, eval-able |
+
+**Real example from an earlier iteration of this demo** (before delegation, when the
+LLM computed inline over the then-current dataset of 24 trailers): asked for the average
+utilization (true value **54.06%** on that dataset), it answered **54.09%** — right
+column, right formula, right grain, but it slipped adding two dozen numbers in its head.
+That result is what motivated the switch to this architecture. The ontology fixes
+*meaning*, not *math*. Delegating the math to an engine eliminates that entire error
+class, and what remains — "did the model write the right query?" — is exactly what the
+ontology governs and exactly what you can eval at scale.
+""")
+    with tab_d:
+        components.html(V2_CONTRACT, height=400, scrolling=True)
+        st.caption("Meaning — including which actions are eligible and what they save — is "
+                   "authored once in the ontology and compiled to every consumer.")
+    with tab_e:
+        components.html(V3_STACK, height=370, scrolling=True)
+
+
 # ===============================================================
 with st.expander("From Insight to Action — where this goes next"):
     st.markdown("""
