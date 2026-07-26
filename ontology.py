@@ -176,6 +176,9 @@ ontology = {
                 "steward": "Decision Science (technical)"
             }
         },
+        "directional_balance": {
+            "rule": "Balancing the network is a FIRST-ORDER objective alongside fill. A lane pair's driver-position requirement is set by the MAX direction: if A->B runs 4 loads and B->A runs 2, the pair needs 4 driver positions and the gap of 2 is repositioning exposure (empty miles) or a rerouting opportunity. A low-utilization BACKHAUL direction is STRUCTURAL, not a planning failure — never recommend 'consolidate harder' on structural backhaul; the levers are rerouting/triangulation (route equipment through a terminal with freight headed the right way, typically via the break terminal) and backhaul-specific utilization targets. Cube utilization is optimized SUBJECT TO network balance and service, never at their expense."
+        },
         "terminal_name_resolution": {
             "rule": "Users refer to terminals by NAME (Harrison, Springfield...); the data stores 3-letter CODES. Resolve names to codes via code_decodes.terminal_codes before filtering (e.g., Harrison -> ORIG_TRML_CD = 'HAR')."
         }
@@ -282,6 +285,20 @@ ontology = {
             "provenance": {"policy": "Linehaul Consolidation Guidelines", "effective": "demo placeholder"},
             "sql_equivalent": "SELECT a.TRLR_NBR AS trailer_1, b.TRLR_NBR AS trailer_2, a.ORIG_TRML_CD, a.DEST_TRML_CD, a.LH_DSPTCH_DT, a.LD_CUBE_FT + b.LD_CUBE_FT AS combined_cube, a.LD_WGT_LB + b.LD_WGT_LB AS combined_wgt, r.LANE_MILES * r.CPM_USD AS est_saving_usd FROM trlr_util_fct a JOIN trlr_util_fct b ON a.ORIG_TRML_CD = b.ORIG_TRML_CD AND a.DEST_TRML_CD = b.DEST_TRML_CD AND a.LH_DSPTCH_DT = b.LH_DSPTCH_DT AND a.TRLR_NBR < b.TRLR_NBR JOIN lane_ref r ON r.ORIG_TRML_CD = a.ORIG_TRML_CD AND r.DEST_TRML_CD = a.DEST_TRML_CD WHERE a.LD_CUBE_FT + b.LD_CUBE_FT <= 2000 AND a.LD_WGT_LB + b.LD_WGT_LB <= 20000 AND a.SHPMT_CNT > 1 AND b.SHPMT_CNT > 1  -- plus the Priority screen via SHPMT_NBR_LST/shpmt_mstr join; state which pairs it removes"
         },
+        "backhaul_rebalance": {
+            "description": "Rebalance directional lane-pair flows: reduce empty repositioning by rerouting equipment through terminals with opposite-direction freight demand.",
+            "eligibility": [
+                "Lane pair directional imbalance >= min_imbalance loads over the analysis window",
+                "Reroute candidates must preserve every shipment's service standard (SVC_STD_DAYS)",
+                "Triangulation legs require freight demand in the equipment's needed direction (planned-route data)"
+            ],
+            "parameters": {
+                "min_imbalance": 2
+            },
+            "impact_formula": "empty_miles_avoided_usd ~= imbalance * LANE_MILES * CPM_USD (repositioning cost proxy)",
+            "owner": "Linehaul network planning",
+            "provenance": {"policy": "Network Balance Guidelines", "effective": "demo placeholder"}
+        },
         "frequency_rationalization": {
             "description": "Reduce weekly schedule count on a persistently low-fill lane.",
             "eligibility": [
@@ -312,8 +329,9 @@ ontology = {
                 "2. Set aside service-protection loads (SHPMT_CNT = 1): dispatched for service per policy — a cost of service, not a planning failure.",
                 "3. The ADDRESSABLE gap is same-lane same-day loads that could legally combine (consolidation eligibility rules) — count moves saved (a merged pair frees a dispatch: driver + tractor + miles).",
                 "4. Quantify the counterfactual: recompute average UTIL_PCT_3 with eligible merges executed — 'current X% -> achievable Y%'. Label it a PLANNING ESTIMATE: departure windows, door capacity, and driver hours are not modeled (departure timestamps are a production data need).",
-                "5. Persistent low-fill high-frequency lanes -> frequency_rationalization, floored at 3 schedules/week for service.",
-                "6. When tradeoffs become network-wide (schedule redesign, terminal balance), escalate to formal optimization (MILP) — same rules become its constraints."
+                "5. DECOMPOSE DIRECTIONALLY: for each lane pair, compare both directions' load counts. Driver positions = MAX direction; the gap = repositioning exposure. A structurally light backhaul is NOT a consolidation problem — apply backhaul_rebalance (rerouting/triangulation) and backhaul-specific targets instead.",
+                "6. Persistent low-fill high-frequency lanes -> frequency_rationalization, floored at 3 schedules/week for service.",
+                "7. When tradeoffs become network-wide (schedule redesign, terminal balance), escalate to formal optimization (MILP) — same rules become its constraints."
             ],
             "owner": "Linehaul load planning (moves) / Network planning (frequency) / Pricing (density mix)"
         }

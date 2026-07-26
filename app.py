@@ -52,9 +52,10 @@ if not api_key:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
 st.sidebar.header("Configuration")
-MODEL_OPTIONS = ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5"]
-MODEL_ID = st.sidebar.selectbox("Model (both sides always use the same one)",
-                                MODEL_OPTIONS, index=0)
+# One model, chosen for intelligence, used identically on both sides.
+# Override without code changes via the ANTHROPIC_MODEL env var / secret
+# (for eval runs comparing models — results are captioned with the model id).
+MODEL_ID = os.environ.get("ANTHROPIC_MODEL", "claude-fable-5")
 if not api_key:
     api_key = st.session_state.get("shared_api_key", "")
 if not api_key:
@@ -149,108 +150,10 @@ def schema_description():
 # ===============================================================
 # ARCHITECTURE DIAGRAM (top of page, expandable)
 # ===============================================================
-ARCHITECTURE_SVG = """
-<svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
-  <rect x="250" y="20" width="400" height="70" rx="10" fill="#d4a373" stroke="#8a5a2b" stroke-width="2"/>
-  <text x="450" y="48" text-anchor="middle" font-size="20" font-weight="bold" fill="#2d1b00">Claude (LLM)</text>
-  <text x="450" y="72" text-anchor="middle" font-size="13" fill="#2d1b00">Answers questions in natural language</text>
-
-  <line x1="450" y1="90" x2="450" y2="140" stroke="#555" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="465" y="120" font-size="12" fill="#333">reasons using</text>
-
-  <rect x="150" y="140" width="600" height="110" rx="10" fill="#a7c957" stroke="#4f772d" stroke-width="2"/>
-  <text x="450" y="168" text-anchor="middle" font-size="20" font-weight="bold" fill="#1a2e05">Semantic Ontology (Context Layer)</text>
-  <text x="450" y="192" text-anchor="middle" font-size="13" fill="#1a2e05">Entities: Shipment, Trailer, Dispatch, Terminal, Lane</text>
-  <text x="450" y="212" text-anchor="middle" font-size="13" fill="#1a2e05">Relationships + Business Rules + Exact Metric Formulas</text>
-  <text x="450" y="232" text-anchor="middle" font-size="13" fill="#1a2e05">e.g., actual_utilization = max(cube%, weight%) — trailer full at EITHER limit</text>
-
-  <line x1="450" y1="250" x2="450" y2="300" stroke="#555" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <text x="465" y="280" font-size="12" fill="#333">grounded in</text>
-
-  <rect x="100" y="300" width="700" height="100" rx="10" fill="#8ecae6" stroke="#219ebc" stroke-width="2"/>
-  <text x="450" y="330" text-anchor="middle" font-size="20" font-weight="bold" fill="#032030">Gold Layer Data (KPI Tables)</text>
-  <text x="250" y="360" text-anchor="middle" font-size="13" fill="#032030">shpmt_mstr</text>
-  <text x="450" y="360" text-anchor="middle" font-size="13" fill="#032030">lh_dsptch</text>
-  <text x="650" y="360" text-anchor="middle" font-size="13" fill="#032030">trlr_util_fct</text>
-  <text x="450" y="385" text-anchor="middle" font-size="12" fill="#032030" font-style="italic">(built from bronze → silver → gold transformations)</text>
-
-  <path d="M 180 95 C 60 130, 60 260, 180 320" fill="none" stroke="#d62828" stroke-width="2.5" stroke-dasharray="7,5" marker-end="url(#arrowRed)"/>
-  <text x="18" y="200" font-size="13" fill="#d62828" font-weight="bold">Without ontology:</text>
-  <text x="18" y="218" font-size="12" fill="#d62828">Claude guesses from</text>
-  <text x="18" y="234" font-size="12" fill="#d62828">raw columns alone</text>
-
-  <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
-    </marker>
-    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#d62828"/>
-    </marker>
-  </defs>
-</svg>
-"""
 
 
-PROD_FLOW_SVG = """
-<svg viewBox="0 0 940 620" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;font-family:Helvetica,Arial,sans-serif;">
-  <text x="470" y="28" text-anchor="middle" font-size="18" font-weight="bold" fill="#212529">Production flow: delegated computation (interpretation vs computation)</text>
 
-  <!-- 1 -->
-  <rect x="290" y="48" width="360" height="52" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
-  <circle cx="315" cy="74" r="13" fill="#212529"/><text x="315" y="79" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">1</text>
-  <text x="485" y="70" text-anchor="middle" font-size="14" font-weight="bold">User asks in natural language</text>
-  <text x="485" y="90" text-anchor="middle" font-size="12" fill="#495057">"What was the average utilization last week?"</text>
-  <line x1="470" y1="100" x2="470" y2="126" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
-  <!-- 2 -->
-  <rect x="250" y="128" width="440" height="60" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
-  <circle cx="275" cy="158" r="13" fill="#1c7ed6"/><text x="275" y="163" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">2</text>
-  <text x="485" y="152" text-anchor="middle" font-size="14" font-weight="bold" fill="#0b4a8b">Orchestration retrieves the relevant ontology slice</text>
-  <text x="485" y="172" text-anchor="middle" font-size="12" fill="#0b4a8b">production design — this POC sends its full (small) ontology, cached</text>
-  <line x1="470" y1="188" x2="470" y2="214" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
-
-  <!-- 3 -->
-  <rect x="250" y="216" width="440" height="60" rx="9" fill="#fff3bf" stroke="#e6a700" stroke-width="1.5"/>
-  <circle cx="275" cy="246" r="13" fill="#e6a700"/><text x="275" y="251" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">3</text>
-  <text x="485" y="240" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a5800">LLM interprets — generates the SQL query</text>
-  <text x="485" y="260" text-anchor="middle" font-size="12" fill="#7a5800">sees schemas only, never the data; never does arithmetic</text>
-  <line x1="470" y1="276" x2="470" y2="302" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
-
-  <!-- 4 -->
-  <rect x="250" y="304" width="440" height="60" rx="9" fill="#ffe3e3" stroke="#d62828" stroke-width="1.5"/>
-  <circle cx="275" cy="334" r="13" fill="#d62828"/><text x="275" y="339" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">4</text>
-  <text x="485" y="328" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a1010">Validation gate — the LLM proposes, the platform disposes</text>
-  <text x="485" y="348" text-anchor="middle" font-size="12" fill="#7a1010">POC: read-only, single statement, table allowlist. Prod adds AST, entitlements, RLS</text>
-  <line x1="470" y1="364" x2="470" y2="390" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
-
-  <!-- 5 -->
-  <rect x="250" y="392" width="440" height="60" rx="9" fill="#d3f9d8" stroke="#2f9e44" stroke-width="1.5"/>
-  <circle cx="275" cy="422" r="13" fill="#2f9e44"/><text x="275" y="427" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">5</text>
-  <text x="485" y="416" text-anchor="middle" font-size="14" font-weight="bold" fill="#14521f">Engine computes — Databricks SQL / DuckDB in this demo</text>
-  <text x="485" y="436" text-anchor="middle" font-size="12" fill="#14521f">digit-perfect numbers; arithmetic errors structurally impossible</text>
-  <line x1="470" y1="452" x2="470" y2="478" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
-
-  <!-- 6 -->
-  <rect x="250" y="480" width="440" height="60" rx="9" fill="#f3f0ff" stroke="#845ef7" stroke-width="1.5"/>
-  <circle cx="275" cy="510" r="13" fill="#845ef7"/><text x="275" y="515" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">6</text>
-  <text x="485" y="504" text-anchor="middle" font-size="14" font-weight="bold" fill="#3b2a80">LLM narrates the result in business language</text>
-  <text x="485" y="524" text-anchor="middle" font-size="12" fill="#3b2a80">citing the metric definition applied (omitted in this demo to focus on query correctness)</text>
-
-  <!-- side annotations -->
-  <text x="115" y="250" text-anchor="middle" font-size="13" font-weight="bold" fill="#e6a700">LLM's job:</text>
-  <text x="115" y="268" text-anchor="middle" font-size="12" fill="#7a5800">interpretation</text>
-  <text x="822" y="420" text-anchor="middle" font-size="13" font-weight="bold" fill="#2f9e44">Engine's job:</text>
-  <text x="822" y="438" text-anchor="middle" font-size="12" fill="#14521f">computation</text>
-  <text x="115" y="330" text-anchor="middle" font-size="13" font-weight="bold" fill="#d62828">Platform's job:</text>
-  <text x="115" y="348" text-anchor="middle" font-size="12" fill="#7a1010">governance</text>
-
-  <defs>
-    <marker id="pa" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
-    </marker>
-  </defs>
-</svg>
-"""
 
 # ===============================================================
 # DELEGATED COMPUTATION: SQL extraction, validation gate, execution
@@ -316,14 +219,14 @@ PROD_FLOW_SVG = """
   <rect x="250" y="128" width="440" height="60" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
   <circle cx="275" cy="158" r="13" fill="#1c7ed6"/><text x="275" y="163" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">2</text>
   <text x="485" y="152" text-anchor="middle" font-size="14" font-weight="bold" fill="#0b4a8b">Orchestration retrieves the relevant ontology slice</text>
-  <text x="485" y="172" text-anchor="middle" font-size="12" fill="#0b4a8b">production design — this POC sends its full (small) ontology, cached</text>
+  <text x="485" y="172" text-anchor="middle" font-size="12" fill="#0b4a8b">POC: retrieves question-relevant slices + always-on core rules from an in-memory index</text>
   <line x1="470" y1="188" x2="470" y2="214" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
   <!-- 3 -->
   <rect x="250" y="216" width="440" height="60" rx="9" fill="#fff3bf" stroke="#e6a700" stroke-width="1.5"/>
   <circle cx="275" cy="246" r="13" fill="#e6a700"/><text x="275" y="251" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">3</text>
   <text x="485" y="240" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a5800">LLM interprets — generates the SQL query</text>
-  <text x="485" y="260" text-anchor="middle" font-size="12" fill="#7a5800">sees schemas only, never the data; never does arithmetic</text>
+  <text x="485" y="260" text-anchor="middle" font-size="12" fill="#7a5800">sees table metadata + 3 sample rows, never the full dataset; never does arithmetic</text>
   <line x1="470" y1="276" x2="470" y2="302" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
   <!-- 4 -->
@@ -337,13 +240,13 @@ PROD_FLOW_SVG = """
   <rect x="250" y="392" width="440" height="60" rx="9" fill="#d3f9d8" stroke="#2f9e44" stroke-width="1.5"/>
   <circle cx="275" cy="422" r="13" fill="#2f9e44"/><text x="275" y="427" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">5</text>
   <text x="485" y="416" text-anchor="middle" font-size="14" font-weight="bold" fill="#14521f">Engine computes — Databricks SQL / DuckDB in this demo</text>
-  <text x="485" y="436" text-anchor="middle" font-size="12" fill="#14521f">digit-perfect numbers; arithmetic errors structurally impossible</text>
+  <text x="485" y="436" text-anchor="middle" font-size="12" fill="#14521f">deterministic arithmetic — LLM calc errors eliminated; query/semantic errors evaluated separately</text>
   <line x1="470" y1="452" x2="470" y2="478" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
   <!-- 6 -->
   <rect x="250" y="480" width="440" height="60" rx="9" fill="#f3f0ff" stroke="#845ef7" stroke-width="1.5"/>
   <circle cx="275" cy="510" r="13" fill="#845ef7"/><text x="275" y="515" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">6</text>
-  <text x="485" y="504" text-anchor="middle" font-size="14" font-weight="bold" fill="#3b2a80">LLM narrates the result in business language</text>
+  <text x="485" y="504" text-anchor="middle" font-size="14" font-weight="bold" fill="#3b2a80">App presents result + definition + trace (prod: optional LLM narration)</text>
   <text x="485" y="524" text-anchor="middle" font-size="12" fill="#3b2a80">citing the metric definition applied (omitted in this demo to focus on query correctness)</text>
 
   <!-- side annotations -->
@@ -1244,48 +1147,90 @@ V3_STACK = """
     <rect x="150" y="122" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="144" text-anchor="middle">In-memory vector index (fastembed)</text>
     <rect x="560" y="122" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="144" text-anchor="middle">Databricks Vector Search</text>
     <rect x="150" y="164" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="186" text-anchor="middle">ontology.py (versioned dict)</text>
-    <rect x="560" y="164" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="186" text-anchor="middle">Governed semantic store + Unity Catalog</text>
+    <rect x="560" y="164" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="186" text-anchor="middle">Governed semantic registry + Unity Catalog (physical governance)</text>
     <rect x="150" y="206" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="228" text-anchor="middle">Regex gate + table allowlist</text>
     <rect x="560" y="206" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="228" text-anchor="middle">SQL AST validation + entitlements + RLS</text>
     <rect x="150" y="248" width="360" height="34" rx="7" fill="#f8f9fa" stroke="#adb5bd"/><text x="330" y="270" text-anchor="middle">Direct Claude API + prompt caching</text>
-    <rect x="560" y="248" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="270" text-anchor="middle">MCP tools over a governed metrics API</text>
+    <rect x="560" y="248" width="330" height="34" rx="7" fill="#e6f4d7" stroke="#4f772d"/><text x="725" y="270" text-anchor="middle">Governed metrics/action APIs, exposed via MCP</text>
   </g>
   <line x1="510" y1="97" x2="560" y2="97" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
   <line x1="510" y1="139" x2="560" y2="139" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
   <line x1="510" y1="181" x2="560" y2="181" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
   <line x1="510" y1="223" x2="560" y2="223" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
   <line x1="510" y1="265" x2="560" y2="265" stroke="#2b8a3e" stroke-width="2" marker-end="url(#v3a)"/>
-  <text x="470" y="316" text-anchor="middle" font-size="12" font-style="italic" fill="#868e96">Same architecture, bigger engines — nothing here requires inventing new technology.</text>
+  <text x="470" y="316" text-anchor="middle" font-size="12" font-style="italic" fill="#868e96">The separation of concerns carries forward; production adds identity, policy enforcement, versioning, evaluation, observability, and operational controls.</text>
   <defs><marker id="v3a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#2b8a3e"/></marker></defs>
 </svg>
 """
 
 
+def lane_imbalance(orig=None):
+    """Directional balance per lane pair: driver requirement is set by the MAX
+    direction; the gap is repositioning exposure (or a rerouting opportunity)."""
+    flows = (utilization.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])
+             .size().reset_index(name='loads'))
+    fmap = {(r['ORIG_TRML_CD'], r['DEST_TRML_CD']): r['loads'] for _, r in flows.iterrows()}
+    rows, seen = [], set()
+    for (a, b) in list(fmap):
+        key = tuple(sorted([a, b]))
+        if key in seen:
+            continue
+        seen.add(key)
+        f, r = fmap.get((key[0], key[1]), 0), fmap.get((key[1], key[0]), 0)
+        rows.append({
+            'lane_pair': f"{TERMINAL_NAMES[key[0]]} ↔ {TERMINAL_NAMES[key[1]]}",
+            f'{key[0]}→{key[1]}': f, f'{key[1]}→{key[0]}': r,
+            'fwd': f, 'rev': r, 'a': key[0], 'b': key[1],
+            'driver_positions_needed': max(f, r),
+            'imbalance (repositioning exposure)': abs(f - r)})
+    df = pd.DataFrame(rows).sort_values('imbalance (repositioning exposure)',
+                                        ascending=False)
+    if orig:
+        df = df[(df['a'] == orig) | (df['b'] == orig)]
+    return df[['lane_pair', 'fwd', 'rev', 'driver_positions_needed',
+               'imbalance (repositioning exposure)']].rename(
+        columns={'fwd': 'direction A→B loads', 'rev': 'direction B→A loads'})
+
+
 def build_network_svg():
-    """The physical network, drawn from the live data: node size/edge width
-    scale with actual load counts, so the map stays truthful across regens."""
+    """Directional map: one curved arrow PER DIRECTION with its own count —
+    because driver requirements are set by the max direction, not the total."""
     POS = {"SGF": (340, 120), "STL": (600, 85), "HAR": (280, 250),
            "MEM": (520, 290), "ATL": (790, 330)}
     flows = (utilization.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])
              .size().reset_index(name='loads'))
-    pair_tot = {}
-    for _, r in flows.iterrows():
-        key = tuple(sorted([r['ORIG_TRML_CD'], r['DEST_TRML_CD']]))
-        pair_tot[key] = pair_tot.get(key, 0) + r['loads']
-    node_tot = {t: 0 for t in POS}
-    for (a, b), n in pair_tot.items():
-        node_tot[a] += n; node_tot[b] += n
-    edges = []
-    for (a, b), n in sorted(pair_tot.items(), key=lambda kv: -kv[1]):
+    fmap = {(r['ORIG_TRML_CD'], r['DEST_TRML_CD']): r['loads'] for _, r in flows.iterrows()}
+    import math
+    arcs, labels = [], []
+    done_pairs = set()
+    for (a, b), n in fmap.items():
         x1, y1 = POS[a]; x2, y2 = POS[b]
-        w = 1.5 + min(n, 12) * 0.55
-        mx, my = (x1 + x2) / 2, (y1 + y2) / 2 - 7
-        edges.append(
-            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#74a2c7" '
-            f'stroke-width="{w:.1f}" stroke-opacity="0.55"/>'
-            f'<text x="{mx}" y="{my}" text-anchor="middle" font-size="11" '
-            f'fill="#40607a" font-weight="bold">{n}</text>')
+        dx, dy = x2 - x1, y2 - y1
+        L = math.hypot(dx, dy) or 1
+        # perpendicular offset separates the two directions
+        px, py = -dy / L * 26, dx / L * 26
+        cx, cy = (x1 + x2) / 2 + px, (y1 + y2) / 2 + py
+        rev = fmap.get((b, a), 0)
+        _min_imb = ontology["actions"]["backhaul_rebalance"]["parameters"]["min_imbalance"]
+        imb = abs(n - rev) >= _min_imb and rev > 0
+        color = "#e6a700" if imb else "#74a2c7"
+        w = 1.5 + min(n, 12) * 0.5
+        arcs.append(f'<path d="M {x1} {y1} Q {cx:.0f} {cy:.0f} {x2} {y2}" fill="none" '
+                    f'stroke="{color}" stroke-width="{w:.1f}" stroke-opacity="0.7" '
+                    f'marker-end="url(#dirarrow)"/>')
+        lx, ly = (x1 + x2) / 2 + px * 1.35, (y1 + y2) / 2 + py * 1.35
+        labels.append(f'<text x="{lx:.0f}" y="{ly:.0f}" text-anchor="middle" '
+                      f'font-size="11" font-weight="bold" fill="{"#8a6100" if imb else "#40607a"}">{n}</text>')
+        key = tuple(sorted([a, b]))
+        if imb and key not in done_pairs:
+            done_pairs.add(key)
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            labels.append(f'<text x="{mx:.0f}" y="{my + 4:.0f}" text-anchor="middle" '
+                          f'font-size="10" font-style="italic" fill="#b00020">Δ{abs(n - rev)}</text>')
     nodes = []
+    node_tot = {t: 0 for t in POS}
+    for (a, b), n in fmap.items():
+        node_tot[a] += n; node_tot[b] += n
     for t, (x, y) in POS.items():
         r = 20 + min(node_tot.get(t, 0), 30) * 0.5
         hub = t == "SGF"
@@ -1297,15 +1242,19 @@ def build_network_svg():
             f'<text x="{x}" y="{y + 12}" text-anchor="middle" font-size="10" '
             f'fill="#495057">{TERMINAL_NAMES[t]}</text>')
     return (
-        '<svg viewBox="0 0 940 400" xmlns="http://www.w3.org/2000/svg" '
+        '<svg viewBox="0 0 940 410" xmlns="http://www.w3.org/2000/svg" '
         'style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;'
         'font-family:Helvetica,Arial,sans-serif;">'
-        '<text x="470" y="26" text-anchor="middle" font-size="16" font-weight="bold" '
-        'fill="#212529">The network in this app — 5 terminals, live load counts per lane pair</text>'
-        + "".join(edges) + "".join(nodes) +
-        '<text x="470" y="388" text-anchor="middle" font-size="11" font-style="italic" '
-        'fill="#868e96">Springfield (violet) is the break terminal — multi-leg freight routes '
-        'through it. Node size and edge width scale with actual loads in the data.</text></svg>')
+        '<text x="470" y="24" text-anchor="middle" font-size="16" font-weight="bold" '
+        'fill="#212529">The network — DIRECTIONAL flows (driver need is set by the max direction)</text>'
+        + "".join(arcs) + "".join(labels) + "".join(nodes) +
+        '<text x="470" y="398" text-anchor="middle" font-size="11" font-style="italic" '
+        'fill="#868e96">Each arrow is one direction with its own load count. Amber arcs with Δn: '
+        'imbalanced pairs — the gap is empty repositioning or a rerouting opportunity. '
+        'Springfield (violet) is the break terminal.</text>'
+        '<defs><marker id="dirarrow" markerWidth="9" markerHeight="9" refX="7" refY="3" '
+        'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#40607a"/></marker></defs></svg>')
+
 
 with st.expander("Start Here — What This App Is", expanded=True):
     st.markdown("""
@@ -1330,7 +1279,7 @@ result: two technically valid queries, two different numbers, one business decis
    detail, for after the proof has landed.
 
 **The data underneath** — a realistic slice of LTL linehaul: **{len(utilization)}
-trailer loads** across **{utilization['ORIG_TRML_CD'].nunique()} terminals** and
+trailer loads** across **{utilization['ORIG_TRML_CD'].nunique()} terminals** (flows shown DIRECTIONALLY below — driver requirements follow the max direction of each lane pair) and
 {len(lane_ref)} directed lanes over ~10 weeks, in four legacy fact tables plus a lane
 reference (miles, cost, schedules, service standards). The schema is deliberately
 hostile — three utilization columns named UTIL_PCT_1/2/3, two competing date fields,
@@ -1410,7 +1359,7 @@ st.caption("Actions in this app are CONVERSATIONAL: ask a question below, and wh
            "relevant the assistant offers the scoped improvement diagnostic — the same "
            "governed engines production would also run as scheduled scans. Roadmap "
            "levers: plan-vs-actual routing variance (actual leg events + override flag), "
-           "head-haul/backhaul balancing, doubles pairing, then MILP when tradeoffs go "
+           "doubles pairing, then MILP when tradeoffs go "
            "network-wide.")
 
 st.header("Ask About Cube Utilization")
@@ -1910,6 +1859,17 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
                        f"Planning estimate; owner: Linehaul load planning.")
             if len(_sdg['moves']):
                 st.dataframe(_sdg['moves'], hide_index=True, use_container_width=True)
+            _imb = lane_imbalance(orig=_scope_code)
+            if len(_imb):
+                st.markdown("**Directional balance** — driver positions are set by the "
+                            "MAX direction; the gap is repositioning exposure:")
+                st.dataframe(_imb, hide_index=True, use_container_width=True)
+                st.caption("Per the governed directional_balance rule: an imbalanced "
+                           "backhaul is STRUCTURAL — 'consolidate harder' is the wrong "
+                           "lever. Governed action: backhaul_rebalance (owner: Linehaul "
+                           "network planning) — rerouting/triangulation via terminals "
+                           "with opposite-direction demand; impact proxy: imbalance × "
+                           "lane miles × CPM in avoided empty repositioning.")
             st.session_state.setdefault("chat_turns", []).append({
                 "q": f"[assistant offer accepted] Improvement opportunities{_scope_label}",
                 "raw": f"Scoped diagnostic: {_sdg['current']}% current, "
@@ -1931,10 +1891,13 @@ st.caption("The proof lives above; the plumbing lives here.")
 
 
 with st.expander("Interactive Knowledge Graph: the Ontology Behind the Scenes", expanded=False):
-    st.caption("This is the live semantic model — not a mockup. Drag nodes, zoom with scroll, "
-               "hover for definitions, computation steps, and join logic. Add an entity or metric "
-               "to ontology.py and it appears here. Five entities and four metrics for this POC — "
-               "a production ontology has hundreds, rendered and governed exactly the same way.")
+    st.caption(f"Generated directly from this POC's semantic definitions in ontology.py — "
+               f"{len(ontology['entities'])} entities, {len(ontology.get('metrics', {}))} metrics, "
+               f"{len(ontology.get('actions', {}))} actions, {len(ontology.get('playbooks', {}))} playbook. "
+               "Drag nodes, zoom with scroll, hover for definitions. A production implementation "
+               "would store and govern these definitions in an enterprise semantic registry — "
+               "the standalone Neo4j loader in this repo compiles the same file to a property "
+               "graph today — and may expose selected relationships through a graph interface.")
     kg_legend(mode="full")
     render_kg(build_kg(), "kg_full.html")
 
@@ -1976,8 +1939,13 @@ ontology governs and exactly what you can eval at scale.
 """)
     with tab_d:
         components.html(V2_CONTRACT, height=400, scrolling=True)
-        st.caption("Meaning — including which actions are eligible and what they save — is "
-                   "authored once in the ontology and compiled to every consumer.")
+        st.caption("Current vs target, labeled honestly: IMPLEMENTED in this POC — RAG "
+                   "prompt slices, parameter-driven action engines (eligibility thresholds "
+                   "read from the ontology), and the property graph via the standalone "
+                   "Neo4j loader. ROADMAP — deterministic semantic compilation of metric "
+                   "SQL, and governed metrics/action APIs exposed to agents through MCP "
+                   "(MCP is the interface protocol; the semantic API governs; backend "
+                   "code computes).")
     with tab_e:
         components.html(V3_STACK, height=370, scrolling=True)
 
@@ -2110,7 +2078,7 @@ with st.expander("For Developers: How This Actually Works"):
     st.markdown("""
 #### The stack
 
-Four libraries, nothing exotic:
+Current stack (streamlit, pandas, numpy, anthropic, pyvis, duckdb, fastembed, scikit-learn):
 
 | Library | Role |
 |---|---|
@@ -2134,14 +2102,19 @@ LLM interprets; DuckDB computes; the platform validates in between:
 
     st.markdown("""
 So: **the ontology goes to the model as instructions plus reference material in
-the message content** — not a special API parameter, not an embedding, not RAG
-retrieval. The model follows the metric definitions because the prompt tells it
-to, and its only output that matters is the query text. (In production: stable
-ontology in the `system` parameter with prompt caching; Databricks SQL warehouse
-instead of DuckDB; the validation gate enforces Unity Catalog permissions.)
+the message content** — as an always-on core plus RAG-RETRIEVED slices from an
+in-memory vector index (fastembed embeddings, TF-IDF lexical fallback), with
+reference-following so a retrieved pattern always brings its metric/action and
+governing rule. The ontology GUIDES generation — the model can still misapply
+it, which is exactly what the verdict evaluates and why production graduates to
+a semantic compiler that ENFORCES. (In production: stable prefix cached in the
+`system` parameter, retrieved tail fresh; Databricks SQL warehouse instead of
+DuckDB; identity, Unity Catalog entitlements, and row/column security enforced
+by the platform.)
 
-The "without ontology" call is **byte-for-byte identical** except the ontology
-JSON is absent — same model, same schemas, same instructions, same token budget.
+The "without ontology" call is identical in model, question, schemas, sample
+rows, generic instructions, and token budget — the only difference is the
+governed semantic bundle (always-on core + retrieved slices).
 
 #### What changes in the traversal
 
@@ -2179,7 +2152,7 @@ from most to least freedom:
 
 | # | Pattern | The LLM emits | Who enforces meaning | Products |
 |---|---|---|---|---|
-| 1 | **Free-form query generation** *(this app)* | SQL text | Nobody — ontology is advice; a gate checks structure, not semantics | Databricks Genie, Snowflake Cortex Analyst |
+| 1 | **Free-form query generation** *(this app)* | SQL text | LLM, GUIDED by curated metadata/instructions/examples; a gate checks structure, not semantics | Databricks Genie, Snowflake Cortex Analyst |
 | 2 | **Governed semantic-layer API** | A structured request: `{metric, group_by, filters, grain}` | The semantic layer — it compiles to SQL; wrong columns aren't on the menu | dbt Semantic Layer, Cube, Looker, Fabric semantic models |
 | 3 | **Graph-native / typed objects** | Cypher/SPARQL, or typed function calls | The graph platform — traversals precompiled from declared links | Neo4j + LLM, Palantir Foundry/AIP |
 | 4 | **Tool use via MCP** | A tool call: `get_lane_utilization(order='asc')` | Deterministic code behind each tool (usually pattern 2 underneath) | Custom MCP servers, agent platforms |
@@ -2187,11 +2160,12 @@ from most to least freedom:
 Note what happens to "traversal" down the ladder: in pattern 1 the LLM *reasons
 about* joins per question; by patterns 2–4 the ontology *defines* the traversals
 once and the LLM merely selects an entry point. Choosing the wrong column stops
-being a mistake the model can make — it is structurally impossible, the same way
+being a mistake the model can make — it is prevented by construction, the same way
 delegating computation made arithmetic errors impossible.
 
-**Most cost-effective at enterprise scale: pattern 2 as the core, exposed
-through pattern 4 for conversational access.** Why: structured requests are
+**Pattern 2 is generally the preferred default for governed KPI retrieval, exposed
+through pattern 4 for conversational access** — free-form SQL stays useful for
+controlled exploration; graph and tool patterns serve different question and action classes. Why: structured requests are
 tens of output tokens instead of hundreds of SQL tokens; the metric "menu" is
 compact, cacheable, and retrievable in slices; intent-to-request is simple
 enough for a small, cheap model, while trustworthy SQL generation wants a
