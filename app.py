@@ -1,3 +1,4 @@
+
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -52,10 +53,13 @@ if not api_key:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
 st.sidebar.header("Configuration")
-# One model, chosen for intelligence, used identically on both sides.
-# Override without code changes via the ANTHROPIC_MODEL env var / secret
-# (for eval runs comparing models — results are captioned with the model id).
-MODEL_ID = os.environ.get("ANTHROPIC_MODEL", "claude-fable-5")
+# ---- Model selection: uncomment exactly ONE default. Both sides always use
+# the same model; every answer is captioned with the model id. The
+# ANTHROPIC_MODEL env var / Streamlit secret overrides without code changes.
+_DEFAULT_MODEL = "claude-sonnet-4-6"   # fast + smart — recommended for live demos
+# _DEFAULT_MODEL = "claude-opus-4-8"   # deeper reasoning; slower, costlier
+# _DEFAULT_MODEL = "claude-fable-5"    # most capable; highest latency (thinking)
+MODEL_ID = os.environ.get("ANTHROPIC_MODEL", _DEFAULT_MODEL)
 if not api_key:
     api_key = st.session_state.get("shared_api_key", "")
 if not api_key:
@@ -303,7 +307,7 @@ RAG_FLOW_SVG = """
   <text x="230" y="326" text-anchor="middle" font-size="13" font-weight="bold" fill="#d62828">What RAG here is NOT</text>
   <text x="230" y="350" text-anchor="middle" font-size="12" fill="#7a1010">not retrieving data rows for the answer —</text>
   <text x="230" y="368" text-anchor="middle" font-size="12" fill="#7a1010">numbers come from the warehouse via SQL</text>
-  <text x="230" y="392" text-anchor="middle" font-size="12" fill="#7a1010">phase 2: also retrieve POLICY provenance</text>
+  <text x="230" y="392" text-anchor="middle" font-size="12" fill="#7a1010">provenance (owner/policy/date) retrieved with each rule</text>
   <text x="230" y="410" text-anchor="middle" font-size="12" fill="#7a1010">(the Finance memo paragraph behind the rule)</text>
 
   <defs>
@@ -684,7 +688,9 @@ def utilization_diagnostic(orig=None):
     # greedy first-fit-decreasing re-pack per lane-day over ELIGIBLE loads
     merged_rows, moves = [], []
     for (o, dd, dt), grp in u.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD', 'LH_DSPTCH_DT']):
-        elig = grp[(grp['SHPMT_CNT'] >= CP["min_shipments_per_load"])].copy()
+        _gwo, _gco = capacity_flags(grp)
+        elig = grp[(grp['SHPMT_CNT'] >= CP["min_shipments_per_load"])
+                   & ~(_gwo | _gco)].copy()  # never add freight to capacity-constrained loads
         if len(elig):
             mask = elig['TRLR_NBR'].map(
                 lambda t: not any(s in _trailer_services(t)
@@ -1333,7 +1339,8 @@ def build_network_svg():
         + "".join(arcs) + "".join(labels) + "".join(nodes) +
         '<text x="470" y="398" text-anchor="middle" font-size="11" font-style="italic" '
         'fill="#868e96">Each arrow is one direction with its own load count. Amber arcs with Δn: '
-        'imbalanced pairs — the gap is empty repositioning or a rerouting opportunity. '
+        'asymmetric directional demand — POTENTIAL repositioning exposure (a proxy; '
+        'actual empty miles need schedule and cycle data). '
         'Springfield (violet) is the break terminal.</text>'
         '<defs><marker id="dirarrow" markerWidth="9" markerHeight="9" refX="7" refY="3" '
         'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#40607a"/></marker></defs></svg>')
@@ -1363,7 +1370,7 @@ result: two technically valid queries, two different numbers, one business decis
    detail, for after the proof has landed.
 
 **The data underneath** — a realistic slice of LTL linehaul: **{len(utilization)}
-trailer loads** across **{utilization['ORIG_TRML_CD'].nunique()} terminals** (flows shown DIRECTIONALLY below — driver requirements follow the max direction of each lane pair) and
+trailer loads** across **{utilization['ORIG_TRML_CD'].nunique()} terminals** (flows shown DIRECTIONALLY below — the directional load requirement, a planning proxy, follows the max direction of each pair) and
 {len(lane_ref)} directed lanes over ~10 weeks, in four legacy fact tables plus a lane
 reference (miles, cost, schedules, service standards). The schema is deliberately
 hostile — three utilization columns named UTIL_PCT_1/2/3, two competing date fields,
@@ -1801,7 +1808,9 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                         _turns = st.session_state.setdefault("chat_turns", [])
                         _new_turn = {
                             "q": user_query,
-                            "raw": _turn_summary(response_raw.content[0].text),
+                            "raw": _turn_summary(
+                            st.session_state.get("exec_cache", {}).get(
+                                "raw_text", "(baseline call unavailable)")),
                             "sem": _turn_summary(response_text),
                         }
                         if _turns and _turns[-1]["q"] == user_query:
@@ -2287,7 +2296,7 @@ FLOW_SVG = """
 
   <rect x="60" y="135" width="370" height="72" rx="8" fill="#ffe3e3" stroke="#d62828" stroke-width="1.5"/>
   <text x="245" y="158" text-anchor="middle" font-size="13" font-weight="bold" fill="#7a1010">Prompt = schemas + question</text>
-  <text x="245" y="178" text-anchor="middle" font-size="12" fill="#7a1010">Column names + dtypes only. No definitions.</text>
+  <text x="245" y="178" text-anchor="middle" font-size="12" fill="#7a1010">Metadata + 3 sample rows. No definitions.</text>
   <text x="245" y="196" text-anchor="middle" font-size="12" fill="#7a1010">"lane" is just a word in the question.</text>
 
   <rect x="550" y="135" width="370" height="72" rx="8" fill="#e6f4d7" stroke="#4f772d" stroke-width="1.5"/>
@@ -2330,7 +2339,7 @@ FLOW_SVG = """
   <text x="245" y="510" text-anchor="middle" font-size="12" fill="#7a1010">returns precise numbers for the wrong thing</text>
 
   <rect x="550" y="448" width="370" height="72" rx="8" fill="#fff" stroke="#4f772d" stroke-width="2"/>
-  <text x="735" y="472" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2e05">SQL matches the canonical definition</text>
+  <text x="735" y="472" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2e05">Executed result matches independent ground truth</text>
   <text x="735" y="492" text-anchor="middle" font-size="12" fill="#1a2e05">Engine returns digit-perfect numbers</text>
   <text x="735" y="510" text-anchor="middle" font-size="12" fill="#1a2e05">for the RIGHT question; query is auditable</text>
 
@@ -2512,7 +2521,7 @@ the business rules, and this story.
 
 **5. Auditability — "why this number?" has a mechanical answer.**
 Every semantic answer carries a trace (which metric definition, which entities) and the
-generated SQL diffs against the metric's canonical SQL. *In this app:* the TRACE-driven
+generated SQL can be reviewed against the metric's reference SQL. *In this app:* the TRACE-driven
 traversal graph and the Generated SQL panels.
 
 **Where this scales — the long tail in one sentence.** Consider: *"Reported utilization
