@@ -33,8 +33,8 @@ ontology = {
             "MEM": "Memphis", "ATL": "Atlanta"
         },
         "CNSTRNT_CD": {
-            "C": "cube-constrained (volume limit reached first)",
-            "W": "weight-constrained (weight limit reached first)"
+            "C": "cube-DOMINANT (cube% > weight% — which limit binds first as the load grows; NOT proof the trailer is full)",
+            "W": "weight-DOMINANT (weight% > cube% — NOT proof the trailer is full)"
         },
         "SVC_TYP_CD": {
             "Economy": "economy service", "Standard": "standard service",
@@ -176,8 +176,12 @@ ontology = {
                 "steward": "Decision Science (technical)"
             }
         },
+        "capacity_status": {
+            "rule": "DOMINANT CONSTRAINT (CNSTRNT_CD) and CAPACITY STATUS are different concepts. A load is WEIGHED-OUT only when UTIL_PCT_2 >= weighed_out_min_pct, CUBED-OUT only when UTIL_PCT_1 >= cubed_out_min_pct; either makes it capacity-constrained (effectively full — additional freight cannot be added, so its utilization is not a planning failure). A weight-DOMINANT load below threshold is simply underutilized and MAY be addressable by planning.",
+            "parameters": {"weighed_out_min_pct": 90, "cubed_out_min_pct": 90}
+        },
         "directional_balance": {
-            "rule": "Balancing the network is a FIRST-ORDER objective alongside fill. A lane pair's driver-position requirement is set by the MAX direction: if A->B runs 4 loads and B->A runs 2, the pair needs 4 driver positions and the gap of 2 is repositioning exposure (empty miles) or a rerouting opportunity. A low-utilization BACKHAUL direction is STRUCTURAL, not a planning failure — never recommend 'consolidate harder' on structural backhaul; the levers are rerouting/triangulation (route equipment through a terminal with freight headed the right way, typically via the break terminal) and backhaul-specific utilization targets. Cube utilization is optimized SUBJECT TO network balance and service, never at their expense."
+            "rule": "Balancing the network is a FIRST-ORDER objective alongside fill. A lane pair's DIRECTIONAL LOAD REQUIREMENT follows the MAX direction: if A->B runs 4 loads and B->A runs 2, equipment/driver planning must cover 4, and the gap of 2 is POTENTIAL repositioning exposure — a volume-imbalance proxy; the actual driver-position and empty-mile figures require departure times, cycles, domiciles, and schedule data. A low-utilization BACKHAUL direction is STRUCTURAL, not a planning failure — never recommend 'consolidate harder' on structural backhaul; the levers are rerouting/triangulation (route equipment through a terminal with freight headed the right way, typically via the break terminal) and backhaul-specific utilization targets. Cube utilization is optimized SUBJECT TO network balance and service, never at their expense."
         },
         "terminal_name_resolution": {
             "rule": "Users refer to terminals by NAME (Harrison, Springfield...); the data stores 3-letter CODES. Resolve names to codes via code_decodes.terminal_codes before filtering (e.g., Harrison -> ORIG_TRML_CD = 'HAR')."
@@ -300,7 +304,7 @@ ontology = {
             "provenance": {"policy": "Network Balance Guidelines", "effective": "demo placeholder"}
         },
         "frequency_rationalization": {
-            "description": "Reduce weekly schedule count on a persistently low-fill lane.",
+            "description": "PRELIMINARY schedule-review signal: flag lanes whose observed fill is persistently low, with evidence-sufficiency thresholds before any schedule decision.",
             "eligibility": [
                 "Lane average UTIL_PCT_3 below 60% over the analysis window",
                 "SCHED_PER_WK >= 5 currently",
@@ -309,7 +313,9 @@ ontology = {
             "parameters": {
                 "max_avg_util_pct": 60,
                 "min_sched_per_wk": 5,
-                "min_frequency_floor": 3
+                "min_frequency_floor": 3,
+                "min_load_count": 4,
+                "min_observed_weeks": 3
             },
             "impact_formula": "weekly_saving_usd = LANE_MILES * CPM_USD per schedule removed",
             "owner": "Linehaul network planning",
@@ -325,7 +331,7 @@ ontology = {
         "improve_cube_utilization": {
             "question_shapes": ["why is utilization low", "how can we improve cube utilization", "how do we get more efficient"],
             "method": [
-                "1. DECOMPOSE before recommending. Split loads by CNSTRNT_CD: weighed-out loads (W) are FULL at low cube — their cube% CANNOT be improved by planning; that is freight mix/density (commercial lever). Never recommend consolidation on weight-bound freight.",
+                "1. DECOMPOSE before recommending, using capacity_status thresholds — NOT CNSTRNT_CD alone. Loads with UTIL_PCT_2 >= weighed_out_min_pct are WEIGHED-OUT (full at low cube: freight density, a commercial/pricing lever, not a planning failure); UTIL_PCT_1 >= cubed_out_min_pct are CUBED-OUT. Only capacity-constrained loads are non-addressable. A weight-DOMINANT load below threshold is underutilized and may be addressable. Never recommend adding freight to capacity-constrained loads.",
                 "2. Set aside service-protection loads (SHPMT_CNT = 1): dispatched for service per policy — a cost of service, not a planning failure.",
                 "3. The ADDRESSABLE gap is same-lane same-day loads that could legally combine (consolidation eligibility rules) — count moves saved (a merged pair frees a dispatch: driver + tractor + miles).",
                 "4. Quantify the counterfactual: recompute average UTIL_PCT_3 with eligible merges executed — 'current X% -> achievable Y%'. Label it a PLANNING ESTIMATE: departure windows, door capacity, and driver hours are not modeled (departure timestamps are a production data need).",

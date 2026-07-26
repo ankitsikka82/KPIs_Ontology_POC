@@ -226,7 +226,7 @@ PROD_FLOW_SVG = """
   <rect x="250" y="216" width="440" height="60" rx="9" fill="#fff3bf" stroke="#e6a700" stroke-width="1.5"/>
   <circle cx="275" cy="246" r="13" fill="#e6a700"/><text x="275" y="251" text-anchor="middle" font-size="13" fill="#fff" font-weight="bold">3</text>
   <text x="485" y="240" text-anchor="middle" font-size="14" font-weight="bold" fill="#7a5800">LLM interprets — generates the SQL query</text>
-  <text x="485" y="260" text-anchor="middle" font-size="12" fill="#7a5800">sees table metadata + 3 sample rows, never the full dataset; never does arithmetic</text>
+  <text x="485" y="260" text-anchor="middle" font-size="12" fill="#7a5800">sees column names/dtypes + 3 sample rows, never the full dataset; never does arithmetic</text>
   <line x1="470" y1="276" x2="470" y2="302" stroke="#555" stroke-width="2" marker-end="url(#pa)"/>
 
   <!-- 4 -->
@@ -495,9 +495,19 @@ def build_ontology_corpus():
     for name, r in ontology.get("business_rules", {}).items():
         if name in CORE_RULES:
             continue  # core rules always ship; only the tail is retrieved
+        prov = r.get("provenance", {})
         chunks.append((f"rule:{name}", "rule",
                        f"BUSINESS RULE {name} | {r.get('rule','')} "
-                       f"{r.get('formula','')} | applies: {r.get('applies_when','')}"))
+                       f"{r.get('formula','')} | applies: {r.get('applies_when','')} "
+                       f"| parameters: {json.dumps(r.get('parameters', {}))} "
+                       f"| owner: {prov.get('owner','')} | policy: {prov.get('policy','')} "
+                       f"| effective: {prov.get('effective','')}"))
+    for name, rel in ontology.get("relationships", {}).items():
+        chunks.append((f"relationship:{name}", "relationship",
+                       f"RELATIONSHIP {name} | {rel.get('from_entity','')} -> "
+                       f"{rel.get('to_entity','')} | {rel.get('description','')} | "
+                       f"cardinality: {rel.get('cardinality','')} | join logic: "
+                       f"{rel.get('join_logic','')}"))
     for i, qp in enumerate(ontology.get("query_patterns", [])):
         chunks.append((f"pattern:{i}:{qp.get('metric','')}", "pattern",
                        f"QUESTION PATTERN: {qp.get('question','')} -> metric "
@@ -505,7 +515,9 @@ def build_ontology_corpus():
     for name, a in ontology.get("actions", {}).items():
         text = (f"ACTION {name} | {a.get('description','')} | eligibility: "
                 + " ".join(a.get("eligibility", []))
+                + f" | parameters: {json.dumps(a.get('parameters', {}))}"
                 + f" | impact: {a.get('impact_formula','')} | owner: {a.get('owner','')}"
+                + f" | provenance: {json.dumps(a.get('provenance', {}))}"
                 + f" | sql: {a.get('sql_equivalent','')}")
         chunks.append((f"action:{name}", "action", text))
     for name, p in ontology.get("playbooks", {}).items():
@@ -567,13 +579,14 @@ def assemble_semantic_slices(user_query, k=6):
         if cid in all_chunks and cid not in have:
             hits.append((all_chunks[cid], -1.0))  # -1 marks "dependency-included"
             have.add(cid)
-    for (cid, _kind, _text), _s in list(hits):
-        if cid.startswith("pattern:"):
-            ref = cid.split(":")[-1].replace(" (ACTION)", "")
-            _force(f"metric:{ref}")
-            _force(f"action:{ref}")
-            if ref == "reported_utilization":
-                _force("rule:reported_utilization_exclusion")
+    _top_pattern = next((cid for (cid, _k, _t), _s in hits
+                         if cid.startswith("pattern:")), None)
+    if _top_pattern:
+        ref = _top_pattern.split(":")[-1].replace(" (ACTION)", "")
+        _force(f"metric:{ref}")
+        _force(f"action:{ref}")
+        if ref == "reported_utilization":
+            _force("rule:reported_utilization_exclusion")
     retrieved_text = "\n\n".join(
         f"[{cid}] (score {score:.3f})\n{text}" for (cid, kind, text), score in hits)
     core = {name: ontology["business_rules"][name] for name in CORE_RULES
@@ -639,6 +652,15 @@ def find_consolidations():
     return pd.DataFrame(eligible), pd.DataFrame(rejected)
 
 
+def capacity_flags(u):
+    """Governed capacity status (thresholds from the ontology) — distinct from
+    the dominant-constraint code CNSTRNT_CD."""
+    T = ontology["business_rules"]["capacity_status"]["parameters"]
+    weighed_out = u['UTIL_PCT_2'] >= T["weighed_out_min_pct"]
+    cubed_out = u['UTIL_PCT_1'] >= T["cubed_out_min_pct"]
+    return weighed_out, cubed_out
+
+
 def utilization_diagnostic(orig=None):
     """Root-cause decomposition + greedy re-pack counterfactual (planning
     estimate — not an optimizer; departure windows/doors/hours unmodeled).
@@ -646,28 +668,35 @@ def utilization_diagnostic(orig=None):
     u = utilization.copy()
     if orig:
         u = u[u['ORIG_TRML_CD'] == orig]
+    CP = ontology["actions"]["consolidation_opportunity"]["parameters"]
     if len(u) == 0:
         return {'current': 0, 'achievable': 0, 'uplift': 0, 'moves': pd.DataFrame(),
-                'total_usd': 0, 'weighed_out_n': 0, 'weighed_out_avg_cube': 0,
-                'service_prot_n': 0, 'total_n': 0}
-    weighed_out = u[u['CNSTRNT_CD'] == 'W']
+                'total_usd': 0, 'weighed_out_n': 0, 'cubed_out_n': 0,
+                'capacity_constrained_n': 0, 'weight_dominant_n': 0,
+                'weighed_out_avg_cube': 0, 'service_prot_n': 0, 'total_n': 0}
+    _wo, _co = capacity_flags(u)
+    weighed_out = u[_wo]
+    cubed_out = u[_co]
+    capacity_constrained = u[_wo | _co]
     service_prot = u[u['SHPMT_CNT'] == 1]
     current_avg = u['UTIL_PCT_3'].mean()
 
     # greedy first-fit-decreasing re-pack per lane-day over ELIGIBLE loads
     merged_rows, moves = [], []
     for (o, dd, dt), grp in u.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD', 'LH_DSPTCH_DT']):
-        elig = grp[(grp['SHPMT_CNT'] > 1)].copy()
+        elig = grp[(grp['SHPMT_CNT'] >= CP["min_shipments_per_load"])].copy()
         if len(elig):
             mask = elig['TRLR_NBR'].map(
-                lambda t: 'Priority' not in _trailer_services(t)).astype(bool)
+                lambda t: not any(s in _trailer_services(t)
+                                  for s in CP["excluded_service_types"])).astype(bool)
             elig = elig[mask]
         inelig = grp.drop(elig.index)
         bins = []
         for _, r in elig.sort_values('LD_CUBE_FT', ascending=False).iterrows():
             placed = False
             for b in bins:
-                if b['cube'] + r['LD_CUBE_FT'] <= 2000 and b['wgt'] + r['LD_WGT_LB'] <= 20000:
+                if (b['cube'] + r['LD_CUBE_FT'] <= CP["max_combined_cube"]
+                        and b['wgt'] + r['LD_WGT_LB'] <= CP["max_combined_weight_lb"]):
                     b['cube'] += r['LD_CUBE_FT']; b['wgt'] += r['LD_WGT_LB']
                     b['members'].append(r['TRLR_NBR']); placed = True
                     break
@@ -699,7 +728,10 @@ def utilization_diagnostic(orig=None):
         'uplift': round(achievable_avg - current_avg, 1),
         'moves': pd.DataFrame(moves),
         'total_usd': int(sum(m['est_saving_usd'] for m in moves)),
-        'weighed_out_n': len(weighed_out), 'weighed_out_avg_cube': round(weighed_out['UTIL_PCT_1'].mean(), 1) if len(weighed_out) else 0,
+        'weighed_out_n': len(weighed_out), 'cubed_out_n': len(cubed_out),
+        'capacity_constrained_n': len(capacity_constrained),
+        'weighed_out_avg_cube': round(weighed_out['UTIL_PCT_1'].mean(), 1) if len(weighed_out) else 0,
+        'weight_dominant_n': int((u['CNSTRNT_CD'] == 'W').sum()),
         'service_prot_n': len(service_prot), 'total_n': len(u),
     }
 
@@ -710,15 +742,23 @@ def find_frequency_candidates():
              .agg(avg_util=('UTIL_PCT_3', 'mean'), loads=('TRLR_NBR', 'count')))
     lanes = lanes.merge(lane_ref, on=['ORIG_TRML_CD', 'DEST_TRML_CD'])
     FP = ontology["actions"]["frequency_rationalization"]["parameters"]
+    uw = utilization.copy()
+    uw['LH_DSPTCH_DT'] = pd.to_datetime(uw['LH_DSPTCH_DT'])
+    uw['wk'] = uw['LH_DSPTCH_DT'].dt.isocalendar().week
+    weeks = (uw.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])['wk']
+             .nunique().reset_index(name='observed_weeks'))
+    lanes = lanes.merge(weeks, on=['ORIG_TRML_CD', 'DEST_TRML_CD'])
     cand = lanes[(lanes['avg_util'] < FP["max_avg_util_pct"])
-                 & (lanes['SCHED_PER_WK'] >= FP["min_sched_per_wk"])].copy()
+                 & (lanes['SCHED_PER_WK'] >= FP["min_sched_per_wk"])
+                 & (lanes['loads'] >= FP["min_load_count"])
+                 & (lanes['observed_weeks'] >= FP["min_observed_weeks"])].copy()
     cand = cand[cand['SCHED_PER_WK'] - 1 >= FP["min_frequency_floor"]]
     cand['lane'] = cand.apply(lambda r: f"{TERMINAL_NAMES[r['ORIG_TRML_CD']]} → "
                                         f"{TERMINAL_NAMES[r['DEST_TRML_CD']]}", axis=1)
     cand['avg_util'] = cand['avg_util'].round(1)
     cand['weekly_saving_usd'] = (cand['LANE_MILES'] * cand['CPM_USD']).round(0)
-    return cand[['lane', 'avg_util', 'loads', 'SCHED_PER_WK', 'SVC_STD_DAYS',
-                 'weekly_saving_usd']]
+    return cand[['lane', 'avg_util', 'loads', 'observed_weeks', 'SCHED_PER_WK',
+                 'SVC_STD_DAYS', 'weekly_saving_usd']]
 
 # ===============================================================
 # CHAT SESSION: Claude is stateless — the orchestration layer (this
@@ -1136,7 +1176,7 @@ V2_CONTRACT = """
   <line x1="545" y1="150" x2="800" y2="115" stroke="#845ef7" stroke-width="2" marker-end="url(#v2a)"/>
   <rect x="330" y="280" width="280" height="50" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
   <text x="470" y="300" text-anchor="middle" font-size="12" font-weight="bold" fill="#495057">Gold data layer</text>
-  <text x="470" y="318" text-anchor="middle" font-size="10" fill="#868e96">facts + lane reference (never in the LLM)</text>
+  <text x="470" y="318" text-anchor="middle" font-size="10" fill="#868e96">facts + lane ref — only metadata + samples reach the LLM</text>
   <line x1="470" y1="280" x2="470" y2="232" stroke="#adb5bd" stroke-width="2" marker-end="url(#v2a)"/>
   <defs><marker id="v2a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#845ef7"/></marker></defs>
 </svg>
@@ -1187,14 +1227,14 @@ def lane_imbalance(orig=None):
             'lane_pair': f"{TERMINAL_NAMES[key[0]]} ↔ {TERMINAL_NAMES[key[1]]}",
             f'{key[0]}→{key[1]}': f, f'{key[1]}→{key[0]}': r,
             'fwd': f, 'rev': r, 'a': key[0], 'b': key[1],
-            'driver_positions_needed': max(f, r),
-            'imbalance (repositioning exposure)': abs(f - r)})
-    df = pd.DataFrame(rows).sort_values('imbalance (repositioning exposure)',
+            'directional_load_requirement': max(f, r),
+            'directional_load_gap (potential repositioning exposure)': abs(f - r)})
+    df = pd.DataFrame(rows).sort_values('directional_load_gap (potential repositioning exposure)',
                                         ascending=False)
     if orig:
         df = df[(df['a'] == orig) | (df['b'] == orig)]
-    return df[['lane_pair', 'fwd', 'rev', 'driver_positions_needed',
-               'imbalance (repositioning exposure)']].rename(
+    return df[['lane_pair', 'fwd', 'rev', 'directional_load_requirement',
+               'directional_load_gap (potential repositioning exposure)']].rename(
         columns={'fwd': 'direction A→B loads', 'rev': 'direction B→A loads'})
 
 
@@ -1252,7 +1292,7 @@ def build_network_svg():
         'style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;'
         'font-family:Helvetica,Arial,sans-serif;">'
         '<text x="470" y="24" text-anchor="middle" font-size="16" font-weight="bold" '
-        'fill="#212529">The network — DIRECTIONAL flows (driver need is set by the max direction)</text>'
+        'fill="#212529">The network — DIRECTIONAL flows (load requirement follows the max direction)</text>'
         + "".join(arcs) + "".join(labels) + "".join(nodes) +
         '<text x="470" y="398" text-anchor="middle" font-size="11" font-style="italic" '
         'fill="#868e96">Each arrow is one direction with its own load count. Amber arcs with Δn: '
@@ -1511,13 +1551,13 @@ it doesn't *know* which is authoritative; it *guesses* from industry patterns, a
 a very good guesser. Free, powerful, and improving with every model generation.
 
 **Explicit semantics** is meaning that is *written down and governed*: your definitions,
-with owners, versions, and provenance. Not smarter — *guaranteed*.
+with owners, versions, and provenance. Not smarter — *governed and accountable*.
 
 | | Implicit (model priors) | Explicit (governed ontology) |
 |---|---|---|
-| Industry conventions ("the composite column", "dispatch date") | ✅ Usually guessed right | ✅ Guaranteed |
-| YOUR institutional rules (Finance exclusions, frequency floors, hold policies) | ❌ **Zero coverage — structurally, forever** | ✅ The only source |
-| Run-to-run consistency | 🎲 A coin flip that usually lands well | 📜 A contract |
+| Industry conventions ("the composite column", "dispatch date") | ✅ Usually guessed right | ✅ Governed contract (guides here; enforced at the compiler rung) |
+| YOUR institutional rules (Finance exclusions, frequency floors, hold policies) | ❌ **Not in any model's training — must be supplied** | ✅ The governed source |
+| Run-to-run consistency | 🎲 A coin flip that usually lands well | 📜 A written contract (fully consistent once compiled/enforced) |
 | Audit answer to "why this number?" | "The model inferred it" | Definition + owner + policy + version |
 
 **Why both sides sometimes tie:** on conventional questions, implicit semantics answers
@@ -1526,7 +1566,7 @@ on the definitions that are *yours*, because no model has ever trained on your c
 internal policies and none ever will.
 
 **The strategic arrow:** implicit coverage *grows* with every model generation; your
-institutional knowledge stays at zero in every model, forever, unless you supply it.
+institutional knowledge is absent from every model unless your systems supply it.
 So the ties will get more common — and the value will concentrate *ever more* on the
 governed layer. The ontology is not a workaround for today's model weaknesses; it is
 the one part of the stack that better models can never replace.
@@ -1591,9 +1631,11 @@ the one part of the stack that better models can never replace.
         with st.spinner("Generating query..."):
             try:
                 t0 = time.time()
-                _fresh = (st.session_state.pop("force_run", False)
-                          or st.session_state.get("exec_cache", {}).get("q") != user_query
-                          or st.session_state.get("exec_cache", {}).get("model") != MODEL_ID)
+                _ec = st.session_state.get("exec_cache", {})
+                _forced = st.session_state.pop("force_run", False)
+                _stale = (_ec.get("q") != user_query or _ec.get("model") != MODEL_ID)
+                _fresh = _forced or _stale or "raw_text" not in _ec
+                _fresh_sem = _forced or _stale or "sem_text" not in _ec
                 if _fresh:
                     response_raw = client.messages.create(
                         model=MODEL_ID,
@@ -1602,12 +1644,14 @@ the one part of the stack that better models can never replace.
                         messages=build_messages("raw", user_query)
                     )
                     _u = response_raw.usage
-                    st.session_state.exec_cache = {"q": user_query, "model": MODEL_ID,
+                    if _stale or _forced:
+                        st.session_state.exec_cache = {}
+                    st.session_state.exec_cache.update({"q": user_query, "model": MODEL_ID,
                         "raw_text": response_text_of(response_raw),
                         "raw_usage": {"input_tokens": _u.input_tokens,
                                       "output_tokens": _u.output_tokens,
                                       "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
-                                      "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}}
+                                      "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}})
                 import types as _t2
                 _c = st.session_state.get("exec_cache", {})
                 if "raw_text" not in _c:
@@ -1628,7 +1672,7 @@ the one part of the stack that better models can never replace.
         with st.spinner("Generating query..."):
             try:
                 t0 = time.time()
-                if _fresh:
+                if _fresh_sem:
                     response_semantic = client.messages.create(
                         model=MODEL_ID,
                         max_tokens=3000,
@@ -1653,7 +1697,7 @@ the one part of the stack that better models can never replace.
                 response_semantic.usage = _t3.SimpleNamespace(**_c2["sem_usage"])
                 sem_elapsed = time.time() - t0
                 response_text = response_semantic.content[0].text
-                if _fresh:
+                if _fresh_sem:
                     st.session_state.setdefault("chat_turns", []).append({
                         "q": user_query,
                         "raw": _turn_summary(response_raw.content[0].text),
@@ -1704,12 +1748,18 @@ the one part of the stack that better models can never replace.
                     m2.lower() for m2 in re.findall(
                         r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", _cur_sql))
                     & ALLOWED_TABLES)
-                derived = []
-                for t in sql_tables:
-                    for e in TABLE_ENTITIES.get(t, []):
-                        if e not in derived:
-                            derived.append(e)
-                if derived:
+                st.session_state.sem_physical_tables = sql_tables
+                # SEMANTIC INTENT: the metric's declared entities are primary;
+                # table-derived entities only as fallback when no metric declared
+                if used_metric and used_metric in ontology.get("metrics", {}):
+                    used_entities = ontology["metrics"][used_metric].get(
+                        "entities", used_entities)
+                elif not used_entities:
+                    derived = []
+                    for t in sql_tables:
+                        for e in TABLE_ENTITIES.get(t, []):
+                            if e not in derived:
+                                derived.append(e)
                     used_entities = derived
                 if not used_entities and user_query in PRESET_METRIC_MAP:
                     used_metric = PRESET_METRIC_MAP[user_query]
@@ -1730,9 +1780,11 @@ the one part of the stack that better models can never replace.
     used_entities, used_rels, used_metric = st.session_state.get("traversal", ([], [], None))
     if used_entities:
         st.header("Semantic Context Selected for This Query")
-        st.caption("Entities (orange) are DERIVED from the tables the executed SQL "
-                   "actually referenced — evidence, not self-report. The metric is the "
-                   "model's own declaration of which definition it followed.")
+        st.caption(f"SEMANTIC INTENT (orange): the entities declared by the metric "
+                   f"definition the model followed. PHYSICAL EVIDENCE: the executed SQL "
+                   f"referenced table(s) "
+                   f"{', '.join(st.session_state.get('sem_physical_tables', [])) or '—'}. "
+                   f"Production derives dimensions/filters/joins via SQL AST parsing.")
         kg_legend(mode="traversal")
         render_kg(build_kg(highlight_entities=used_entities,
                            highlight_relationships=used_rels,
@@ -1835,12 +1887,21 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
     _NAME_TO_CODE = {v.lower(): k for k, v in TERMINAL_NAMES.items()}
     _turns = st.session_state.get("chat_turns", [])
     _scan = _lq.lower() + " " + (_turns[-1]["sem"].lower() if _turns else "")
-    _matches = []
+    _found = []
     for _nm, _cd in _NAME_TO_CODE.items():
-        if _nm in _scan or f" {_cd.lower()} " in f" {_scan} " or f"({_cd.lower()})" in _scan:
-            _matches.append(_cd)
+        _pos = _scan.find(_nm)
+        if _pos < 0:
+            for _tok in (f" {_cd.lower()} ", f"({_cd.lower()})"):
+                _p2 = f" {_scan} ".find(_tok)
+                if _p2 >= 0:
+                    _pos = _p2
+                    break
+        if _pos >= 0:
+            _found.append((_pos, _cd))
+    _matches = [cd for _p, cd in sorted(_found)]  # ordered by first mention
+    _offer_box = st.container(border=True)
     if len(_matches) > 1:
-        _choice = st.radio("Multiple terminals mentioned — scope the analysis to:",
+        _choice = _offer_box.radio("Multiple terminals mentioned — scope the analysis to:",
                            [TERMINAL_NAMES[c] for c in _matches] + ["Network-wide"],
                            horizontal=True, key="scope_choice")
         _scope_code = (None if _choice == "Network-wide"
@@ -1848,10 +1909,12 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
     else:
         _scope_code = _matches[0] if _matches else None
     _scope_label = f" for {TERMINAL_NAMES[_scope_code]}-origin lanes" if _scope_code else " (network-wide)"
-    st.markdown("---")
-    st.markdown(f"💬 **Assistant:** Want me to check for improvement "
-                f"opportunities{_scope_label}?")
-    if st.button(f"🔍 Yes — analyze opportunities{_scope_label}"):
+    with _offer_box:
+        st.markdown(f"### 💬 Assistant follow-up")
+        st.markdown(f"**Want me to check for improvement opportunities{_scope_label}?** "
+                    f"I'll run the governed diagnostic — root cause first, then the moves.")
+    if _offer_box.button(f"🔍 Yes — analyze opportunities{_scope_label}",
+                         type="primary", use_container_width=True):
         _sdg = utilization_diagnostic(orig=_scope_code)
         if _sdg['total_n'] == 0:
             st.info("No loads in that scope this period.")
@@ -1863,16 +1926,22 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
             _o3.metric("Moves saved",
                        int(_sdg['moves']['moves_saved'].sum()) if len(_sdg['moves']) else 0)
             _o4.metric("Est. saving", f"${_sdg['total_usd']:,}")
-            st.caption(f"Scope: {_sdg['total_n']} loads — {_sdg['weighed_out_n']} "
-                       f"weighed-out (density/pricing lever, not planning), "
-                       f"{_sdg['service_prot_n']} service-protection (policy). "
-                       f"Planning estimate; owner: Linehaul load planning.")
+            st.caption(f"Scope: {_sdg['total_n']} loads — capacity-constrained "
+                       f"(≥ governed thresholds): {_sdg['capacity_constrained_n']} "
+                       f"({_sdg['weighed_out_n']} weighed-out, {_sdg['cubed_out_n']} "
+                       f"cubed-out — effectively full; density/mix lever, not planning). "
+                       f"Weight-DOMINANT but below threshold: "
+                       f"{_sdg['weight_dominant_n'] - _sdg['weighed_out_n']} — "
+                       f"underutilized and potentially addressable. Service-protection "
+                       f"(policy): {_sdg['service_prot_n']}. Planning estimate; owner: "
+                       f"Linehaul load planning.")
             if len(_sdg['moves']):
                 st.dataframe(_sdg['moves'], hide_index=True, use_container_width=True)
             _imb = lane_imbalance(orig=_scope_code)
             if len(_imb):
-                st.markdown("**Directional balance** — driver positions are set by the "
-                            "MAX direction; the gap is repositioning exposure:")
+                st.markdown("**Directional balance** — the load requirement follows "
+                            "the MAX direction; the gap is a volume-imbalance proxy for "
+                            "potential repositioning exposure:")
                 st.dataframe(_imb, hide_index=True, use_container_width=True)
                 st.caption("Per the governed directional_balance rule: an imbalanced "
                            "backhaul is STRUCTURAL — 'consolidate harder' is the wrong "
@@ -2099,7 +2168,7 @@ Current stack (streamlit, pandas, numpy, anthropic, pyvis, duckdb, fastembed, sc
 
 The ontology itself is a **plain Python dictionary** in `ontology.py` - entities,
 relationships, business rules, metric definitions with step-by-step computation
-logic, and query patterns. No graph database, no vector store, no fine-tuning.
+logic, and query patterns. An in-memory vector index over the ontology (fastembed/TF-IDF); no fine-tuning.
 
 #### How the ontology reaches Claude — and what Claude returns
 
@@ -2219,7 +2288,7 @@ guarantee. *In this app:* rerun any ranking question several times per side and 
 
 **4. Governance and change management — fix meaning once.**
 During this build, a domain expert caught the utilization formula encoding min() instead
-of max(). One edit in ontology.py corrected every downstream answer. In a schema-only
+of max(). One edit in ontology.py corrected the definition every consumer compiles from (answers heal on their next run). In a schema-only
 world that error lives on in a thousand ad-hoc queries. *In this app:* the max() rule in
 the business rules, and this story.
 
