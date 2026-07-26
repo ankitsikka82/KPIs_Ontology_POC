@@ -729,6 +729,13 @@ def find_frequency_candidates():
 MAX_TURNS_IN_CONTEXT = 4
 
 
+def response_text_of(resp):
+    """Join the TEXT blocks of an API response. Thinking-capable models
+    (e.g., Fable) return thinking blocks first — never index content[0]."""
+    parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+    return "\n".join(parts) if parts else ""
+
+
 def _turn_summary(text):
     """Compact prior-turn answer: explanation + SQL, capped, TRACE stripped."""
     lines = [l for l in text.splitlines() if not l.strip().startswith("TRACE:")]
@@ -970,7 +977,6 @@ def truth_reported_sgf_lanes():
 
 def truth_consolidation():
     elig, rej = find_consolidations()
-    freq_note = ""
     if len(elig):
         total = int(elig['est_saving_usd'].sum())
         pair_txt = "; ".join(f"{r['trailer_1']}+{r['trailer_2']} on {r['lane']} "
@@ -1489,7 +1495,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
 
     st.caption("Controlled comparison — production architecture: both sides see table "
                "metadata plus 3 sample rows (never the full dataset), same model, question, instructions, and "
-               "1,200-token budget. Each writes SQL; DuckDB executes it. The stable context "
+               "3,000-token budget. Each writes SQL; DuckDB executes it. The stable context "
                "(schemas + ontology) sits in the cached system prompt, as in production — "
                "watch the cache-read numbers under each answer after the first question. "
                "The honest framing: the left side is not semantics-free — the model "
@@ -1574,7 +1580,7 @@ the one part of the stack that better models can never replace.
             cache_r = getattr(usage, "cache_read_input_tokens", 0) or 0
             st.caption(f"⏱ {elapsed:.1f}s · {MODEL_ID} · tokens: {usage.input_tokens:,} fresh in, "
                        f"{cache_w:,} cache-write, {cache_r:,} cache-read (~10% price) / "
-                       f"{usage.output_tokens:,} out (budget: 1,200 — same both sides"
+                       f"{usage.output_tokens:,} out (budget: 3,000 — same both sides"
                        f"{extra_note}). First question warms the cache; "
                        f"repeat questions reuse the identical stable prefix; retrieved "
                        f"slices are processed fresh each question.")
@@ -1591,20 +1597,21 @@ the one part of the stack that better models can never replace.
                 if _fresh:
                     response_raw = client.messages.create(
                         model=MODEL_ID,
-                        max_tokens=1200,
+                        max_tokens=3000,
                         system=raw_system,
                         messages=build_messages("raw", user_query)
                     )
-                    import types as _t
                     _u = response_raw.usage
                     st.session_state.exec_cache = {"q": user_query, "model": MODEL_ID,
-                        "raw_text": response_raw.content[0].text,
+                        "raw_text": response_text_of(response_raw),
                         "raw_usage": {"input_tokens": _u.input_tokens,
                                       "output_tokens": _u.output_tokens,
                                       "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
                                       "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}}
                 import types as _t2
-                _c = st.session_state.exec_cache
+                _c = st.session_state.get("exec_cache", {})
+                if "raw_text" not in _c:
+                    raise RuntimeError("No cached response — re-ask the question.")
                 class _RawResp: pass
                 response_raw = _RawResp()
                 response_raw.content = [_t2.SimpleNamespace(text=_c["raw_text"])]
@@ -1624,19 +1631,22 @@ the one part of the stack that better models can never replace.
                 if _fresh:
                     response_semantic = client.messages.create(
                         model=MODEL_ID,
-                        max_tokens=1200,
+                        max_tokens=3000,
                         system=semantic_system,
                         messages=build_messages("sem", user_query)
                     )
                     _u2 = response_semantic.usage
                     st.session_state.exec_cache.update({
-                        "sem_text": response_semantic.content[0].text,
+                        "sem_text": response_text_of(response_semantic),
                         "sem_usage": {"input_tokens": _u2.input_tokens,
                                       "output_tokens": _u2.output_tokens,
                                       "cache_creation_input_tokens": getattr(_u2, "cache_creation_input_tokens", 0) or 0,
                                       "cache_read_input_tokens": getattr(_u2, "cache_read_input_tokens", 0) or 0}})
                 import types as _t3
-                _c2 = st.session_state.exec_cache
+                _c2 = st.session_state.get("exec_cache", {})
+                if "sem_text" not in _c2:
+                    raise RuntimeError("No cached semantic response — the raw side "
+                                       "likely failed this run; re-ask the question.")
                 class _SemResp: pass
                 response_semantic = _SemResp()
                 response_semantic.content = [_t3.SimpleNamespace(text=_c2["sem_text"])]
@@ -2060,10 +2070,10 @@ prompt = (
     + SCHEMAS_ONLY  # column names + dtypes + 3 sample rows; never full data
 )
 response = client.messages.create(
-    model=MODEL_ID, max_tokens=1200,
+    model=MODEL_ID, max_tokens=3000,
     messages=[{"role": "user", "content": prompt + "\\n\\nQuestion: " + user_query}]
 )
-sql = extract_sql(response.content[0].text)
+sql = extract_sql(response_text_of(response))  # never content[0]: thinking blocks come first
 
 # 2. GOVERN: validation gate — read-only, single statement, allowed tables
 ok, sql = validate_sql(sql)
