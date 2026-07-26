@@ -1483,6 +1483,14 @@ EXCEPTION: if the question is conversational or fully answerable from the prior
 turns of this conversation (e.g., prioritizing or explaining results already
 shown), answer directly WITHOUT any SQL block — the system will display your
 text as the answer.
+ACTION/IMPROVEMENT questions ("how can we improve", "any opportunities",
+"what should we do"): the governed action engines compute these
+deterministically — root-cause decomposition, consolidation candidates,
+frequency signals, directional balance. Do NOT attempt the full multi-step
+analysis in one SQL query. Give a brief scoped observation if a simple query
+helps (e.g., the scope's average utilization), then state that the complete
+governed diagnostic is available via the assistant's follow-up offer below
+the answer.
 
 Respond with ONE short sentence explaining your approach, then the query in a ```sql
 fenced block. The system will execute it — do not fabricate result numbers.
@@ -1500,6 +1508,14 @@ EXCEPTION: if the question is conversational or fully answerable from the prior
 turns of this conversation (e.g., prioritizing or explaining results already
 shown), answer directly WITHOUT any SQL block — the system will display your
 text as the answer.
+ACTION/IMPROVEMENT questions ("how can we improve", "any opportunities",
+"what should we do"): the governed action engines compute these
+deterministically — root-cause decomposition, consolidation candidates,
+frequency signals, directional balance. Do NOT attempt the full multi-step
+analysis in one SQL query. Give a brief scoped observation if a simple query
+helps (e.g., the scope's average utilization), then state that the complete
+governed diagnostic is available via the assistant's follow-up offer below
+the answer.
 
 Respond with ONE short sentence explaining your approach (naming the metric
 definition you followed), then the query in a ```sql fenced block. The system will
@@ -1924,7 +1940,17 @@ the one part of the stack that better models can never replace.
                 if _pok:
                     _pres, _perr = run_sql(_pbody)
                     if _perr is None:
-                        st.dataframe(_pres, hide_index=True, use_container_width=True)
+                        if len(_pres) == 0:
+                            st.caption("The query matched no rows — this can itself "
+                                       "be the finding (e.g., no same-day "
+                                       "consolidation pairs in this scope). For "
+                                       "improvement questions, the assistant's "
+                                       "follow-up offer below runs the full governed "
+                                       "diagnostic: root cause, frequency signals, "
+                                       "and directional balance.")
+                        else:
+                            st.dataframe(_pres, hide_index=True,
+                                         use_container_width=True)
                     else:
                         st.error(f"Execution error: {_perr}")
                 else:
