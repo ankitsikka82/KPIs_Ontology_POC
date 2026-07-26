@@ -1339,7 +1339,8 @@ def build_network_svg():
         'orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#40607a"/></marker></defs></svg>')
 
 
-with st.expander("Start Here — What This App Is", expanded=True):
+_has_convo = bool(st.session_state.get("chat_turns"))
+with st.expander("Start Here — What This App Is", expanded=not _has_convo):
     st.markdown("""
 **The problem this app demonstrates.** Enterprise AI can query data fluently — but it
 does not automatically know which definition, date, code, or policy the company
@@ -1424,41 +1425,43 @@ knowledge graph, and the validation gate's honest scope.
 # ===============================================================
 # KPI DASHBOARD: the ANTICIPATED questions (traditional BI world)
 # ===============================================================
-st.header("KPI Dashboard — the anticipated questions")
-st.caption("This is the world that already exists: curated gold metrics on a dashboard, "
-           "answering the questions someone anticipated at build time. The conversational "
-           "section below serves the UNANTICIPATED tail — cuts and combinations nobody "
-           "pre-built — with the ontology supplying the meaning at query time. This mirrors "
-           "embedding a chat assistant inside an existing KPI dashboard application.")
+with st.expander("📊 Network KPI snapshot & dashboard", expanded=not _has_convo):
+    st.header("KPI Dashboard — the anticipated questions")
+    st.caption("This is the world that already exists: curated gold metrics on a dashboard, "
+               "answering the questions someone anticipated at build time. The conversational "
+               "section below serves the UNANTICIPATED tail — cuts and combinations nobody "
+               "pre-built — with the ontology supplying the meaning at query time. This mirrors "
+               "embedding a chat assistant inside an existing KPI dashboard application.")
 
-_inc = utilization[utilization['SHPMT_CNT'] > 1]
-_kc1, _kc2, _kc3, _kc4 = st.columns(4)
-_kc1.metric("Reported utilization", f"{_inc['UTIL_PCT_3'].mean():.1f}%",
-            help="Per the 2019 Finance policy: service-protection loads excluded")
-_kc2.metric("Operational utilization (all loads)", f"{utilization['UTIL_PCT_3'].mean():.1f}%")
-_kc3.metric("Loads dispatched", f"{len(utilization)}")
-_kc4.metric("Service-protection loads", f"{(utilization['SHPMT_CNT'] == 1).sum()}")
+    _inc = utilization[utilization['SHPMT_CNT'] > 1]
+    _kc1, _kc2, _kc3, _kc4 = st.columns(4)
+    _kc1.metric("Reported utilization", f"{_inc['UTIL_PCT_3'].mean():.1f}%",
+                help="Per the 2019 Finance policy: service-protection loads excluded")
+    _kc2.metric("Operational utilization (all loads)", f"{utilization['UTIL_PCT_3'].mean():.1f}%")
+    _kc3.metric("Loads dispatched", f"{len(utilization)}")
+    _kc4.metric("Service-protection loads", f"{(utilization['SHPMT_CNT'] == 1).sum()}")
 
-_d1, _d2 = st.columns(2)
-with _d1:
-    st.markdown("**Weekly reported utilization**")
-    _u = _inc.copy()
-    _u['LH_DSPTCH_DT'] = pd.to_datetime(_u['LH_DSPTCH_DT'])
-    _u['week'] = (_u['LH_DSPTCH_DT']
-                  - pd.to_timedelta(_u['LH_DSPTCH_DT'].dt.dayofweek, unit='D')).dt.date
-    _wk = _u.groupby('week')['UTIL_PCT_3'].mean().round(2)
-    st.line_chart(_wk)
-with _d2:
-    st.markdown("**Worst lanes (reported)**")
-    _ln = (_inc.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])['UTIL_PCT_3']
-           .mean().round(2).sort_values().head(5))
-    _ln.index = [f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}" for o, dd in _ln.index]
-    st.bar_chart(_ln)
+    _d1, _d2 = st.columns(2)
+    with _d1:
+        st.markdown("**Weekly reported utilization**")
+        _u = _inc.copy()
+        _u['LH_DSPTCH_DT'] = pd.to_datetime(_u['LH_DSPTCH_DT'])
+        _u['week'] = (_u['LH_DSPTCH_DT']
+                      - pd.to_timedelta(_u['LH_DSPTCH_DT'].dt.dayofweek, unit='D')).dt.date
+        _wk = _u.groupby('week')['UTIL_PCT_3'].mean().round(2)
+        st.line_chart(_wk)
+    with _d2:
+        st.markdown("**Worst lanes (reported)**")
+        _ln = (_inc.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])['UTIL_PCT_3']
+               .mean().round(2).sort_values().head(5))
+        _ln.index = [f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}" for o, dd in _ln.index]
+        st.bar_chart(_ln)
 
 
-# ===============================================================
-# ACTION PANEL: from measurement to governed action
-# ===============================================================
+    # ===============================================================
+    # ACTION PANEL: from measurement to governed action
+    # ===============================================================
+
 st.caption("Actions in this app are CONVERSATIONAL: ask a question below, and when "
            "relevant the assistant offers the scoped improvement diagnostic — the same "
            "governed engines production would also run as scheduled scans. Roadmap "
@@ -1540,10 +1543,12 @@ if user_query and api_key:
     raw_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
-EXCEPTION: if the question is conversational or fully answerable from the prior
-turns of this conversation (e.g., prioritizing or explaining results already
-shown), answer directly WITHOUT any SQL block — the system will display your
-text as the answer.
+EXCEPTION: if the question is PURELY about prioritizing, comparing, or explaining
+results ALREADY DISPLAYED in prior turns, answer directly WITHOUT any SQL block.
+STRICT LIMIT: any request for NEW numbers — breakdowns by a dimension, different
+grains, filters, scopes, or time windows (e.g., "break that down by lane",
+"show last week instead") — REQUIRES a fresh SQL query even in a follow-up;
+prior context tells you what "that" refers to, not the numbers themselves.
 ACTION/IMPROVEMENT questions ("how can we improve", "any opportunities",
 "what should we do"): the governed action engines compute these
 deterministically — root-cause decomposition, consolidation candidates,
@@ -1565,10 +1570,12 @@ fenced block. The system will execute it — do not fabricate result numbers.
     semantic_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
-EXCEPTION: if the question is conversational or fully answerable from the prior
-turns of this conversation (e.g., prioritizing or explaining results already
-shown), answer directly WITHOUT any SQL block — the system will display your
-text as the answer.
+EXCEPTION: if the question is PURELY about prioritizing, comparing, or explaining
+results ALREADY DISPLAYED in prior turns, answer directly WITHOUT any SQL block.
+STRICT LIMIT: any request for NEW numbers — breakdowns by a dimension, different
+grains, filters, scopes, or time windows (e.g., "break that down by lane",
+"show last week instead") — REQUIRES a fresh SQL query even in a follow-up;
+prior context tells you what "that" refers to, not the numbers themselves.
 ACTION/IMPROVEMENT questions ("how can we improve", "any opportunities",
 "what should we do"): the governed action engines compute these
 deterministically — root-cause decomposition, consolidation candidates,
@@ -1618,47 +1625,46 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
     st.session_state.last_raw_prompt = f"[SYSTEM, cached]\n{raw_context}\n\n[USER]\n{user_query}"
     st.session_state.last_semantic_prompt = f"[SYSTEM, cached]\n{semantic_context}\n\n[USER]\n{user_query}"
 
-    st.caption("Controlled comparison — production architecture: both sides see table "
-               "metadata plus 3 sample rows (never the full dataset), same model, question, instructions, and "
-               "3,000-token budget. Each writes SQL; DuckDB executes it. The stable context "
-               "(schemas + ontology) sits in the cached system prompt, as in production — "
-               "watch the cache-read numbers under each answer after the first question. "
-               "The honest framing: the left side is not semantics-free — the model "
-               "carries powerful IMPLICIT semantics from training and naming conventions. "
-               "The comparison is implicit semantics vs EXPLICIT governed semantics. "
-               "Institutional rules (try the reported-utilization question) are where "
-               "implicit hits its ceiling.")
-    with st.expander("📖 Implicit vs Explicit Semantics — the one concept to take away"):
-        st.markdown("""
-**Implicit semantics** is everything the model absorbed about freight from training —
-thousands of schemas, KPI dictionaries, and logistics docs. When it sees UTIL_PCT_1/2/3
-it doesn't *know* which is authoritative; it *guesses* from industry patterns, and it is
-a very good guesser. Free, powerful, and improving with every model generation.
-
-**Explicit semantics** is meaning that is *written down and governed*: your definitions,
-with owners, versions, and provenance. Not smarter — *governed and accountable*.
-
-| | Implicit (model priors) | Explicit (governed ontology) |
-|---|---|---|
-| Industry conventions ("the composite column", "dispatch date") | ✅ Usually guessed right | ✅ Governed contract (guides here; enforced at the compiler rung) |
-| YOUR institutional rules (Finance exclusions, frequency floors, hold policies) | ❌ **Not in any model's training — must be supplied** | ✅ The governed source |
-| Run-to-run consistency | 🎲 A coin flip that usually lands well | 📜 A written contract (fully consistent once compiled/enforced) |
-| Audit answer to "why this number?" | "The model inferred it" | Definition + owner + policy + version |
-
-**Why both sides sometimes tie:** on conventional questions, implicit semantics answers
-correctly for free — and this demo says so honestly. The ROI of an ontology concentrates
-on the definitions that are *yours*, because no model has ever trained on your company's
-internal policies and none ever will.
-
-**The strategic arrow:** implicit coverage *grows* with every model generation; your
-institutional knowledge is absent from every model unless your systems supply it.
-So the ties will get more common — and the value will concentrate *ever more* on the
-governed layer. The ontology is not a workaround for today's model weaknesses; it is
-the one part of the stack that better models can never replace.
-""")
-
-    st.session_state.primary_answer_slot = st.container()
+    _primary_slot = st.container()
     with st.expander("🔬 How this answer was produced — with/without comparison, RAG retrieval, validation gate, ground truth, verdict", expanded=False):
+        st.caption("Controlled comparison — production architecture: both sides see table "
+                   "metadata plus 3 sample rows (never the full dataset), same model, question, instructions, and "
+                   "3,000-token budget. Each writes SQL; DuckDB executes it. The stable context "
+                   "(schemas + ontology) sits in the cached system prompt, as in production — "
+                   "watch the cache-read numbers under each answer after the first question. "
+                   "The honest framing: the left side is not semantics-free — the model "
+                   "carries powerful IMPLICIT semantics from training and naming conventions. "
+                   "The comparison is implicit semantics vs EXPLICIT governed semantics. "
+                   "Institutional rules (try the reported-utilization question) are where "
+                   "implicit hits its ceiling.")
+        with st.expander("📖 Implicit vs Explicit Semantics — the one concept to take away"):
+            st.markdown("""
+    **Implicit semantics** is everything the model absorbed about freight from training —
+    thousands of schemas, KPI dictionaries, and logistics docs. When it sees UTIL_PCT_1/2/3
+    it doesn't *know* which is authoritative; it *guesses* from industry patterns, and it is
+    a very good guesser. Free, powerful, and improving with every model generation.
+
+    **Explicit semantics** is meaning that is *written down and governed*: your definitions,
+    with owners, versions, and provenance. Not smarter — *governed and accountable*.
+
+    | | Implicit (model priors) | Explicit (governed ontology) |
+    |---|---|---|
+    | Industry conventions ("the composite column", "dispatch date") | ✅ Usually guessed right | ✅ Governed contract (guides here; enforced at the compiler rung) |
+    | YOUR institutional rules (Finance exclusions, frequency floors, hold policies) | ❌ **Not in any model's training — must be supplied** | ✅ The governed source |
+    | Run-to-run consistency | 🎲 A coin flip that usually lands well | 📜 A written contract (fully consistent once compiled/enforced) |
+    | Audit answer to "why this number?" | "The model inferred it" | Definition + owner + policy + version |
+
+    **Why both sides sometimes tie:** on conventional questions, implicit semantics answers
+    correctly for free — and this demo says so honestly. The ROI of an ontology concentrates
+    on the definitions that are *yours*, because no model has ever trained on your company's
+    internal policies and none ever will.
+
+    **The strategic arrow:** implicit coverage *grows* with every model generation; your
+    institutional knowledge is absent from every model unless your systems supply it.
+    So the ties will get more common — and the value will concentrate *ever more* on the
+    governed layer. The ontology is not a workaround for today's model weaknesses; it is
+    the one part of the stack that better models can never replace.
+    """)
         st.markdown("#### RAG step — semantic context retrieved for this question")
         if True:
             st.caption(f"Retrieval engine: {st.session_state.get('rag_engine', '')} — the "
@@ -1802,6 +1808,7 @@ the one part of the stack that better models can never replace.
                             _turns[-1] = _new_turn  # re-ask replaces, never duplicates
                         else:
                             _turns.append(_new_turn)
+                        st.session_state["_turn_needs_result"] = True
 
                     used_entities, used_rels, used_metric = [], [], None
                     answer_lines = []
@@ -1984,9 +1991,9 @@ the one part of the stack that better models can never replace.
                 st.dataframe(utilization, hide_index=True, use_container_width=True)
 
 
-    # ---- PRIMARY CHAT ANSWER (fills the slot ABOVE the evidence expander) ----
+    # ---- PRIMARY CHAT ANSWER: answer first, visual when it helps, method last ----
     _pc = st.session_state.get("exec_cache", {})
-    with st.session_state.primary_answer_slot:
+    with _primary_slot:
         with st.chat_message("user"):
             st.write(user_query)
         with st.chat_message("assistant"):
@@ -1994,32 +2001,82 @@ the one part of the stack that better models can never replace.
             _pans = "\n".join(l for l in _ptxt.splitlines()
                               if not l.strip().startswith("TRACE:"))
             _pexpl = _pans.split("```")[0].strip()
-            st.write(_pexpl or "(no answer)")
             _psql = extract_sql(_pans)
+            _pres, _perr, _pok = None, None, False
             if _psql:
                 _pok, _pbody = validate_sql(_psql)
                 if _pok:
                     _pres, _perr = run_sql(_pbody)
-                    if _perr is None:
-                        if len(_pres) == 0:
-                            st.caption("The query matched no rows — this can itself "
-                                       "be the finding (e.g., no same-day "
-                                       "consolidation pairs in this scope). For "
-                                       "improvement questions, the assistant's "
-                                       "follow-up offer below runs the full governed "
-                                       "diagnostic: root cause, frequency signals, "
-                                       "and directional balance.")
-                        else:
-                            st.dataframe(_pres, hide_index=True,
-                                         use_container_width=True)
-                    else:
-                        st.error(f"Execution error: {_perr}")
                 else:
-                    st.error(f"Validation gate: {_pbody}")
+                    _perr = _pbody
+
+            def _fmtv(c, v):
+                cl = c.lower()
+                if isinstance(v, float):
+                    if "util" in cl or "pct" in cl:
+                        return f"{v:,.1f}%"
+                    if "usd" in cl or "saving" in cl or "cost" in cl:
+                        return f"${v:,.0f}"
+                    return f"{v:,.2f}"
+                if isinstance(v, int) and ("usd" in cl or "saving" in cl):
+                    return f"${v:,}"
+                return f"{v:,}" if isinstance(v, int) else str(v)
+
+            if _psql and _perr is None and _pres is not None and len(_pres):
+                if len(_pres) == 1:
+                    st.markdown("### " + "  \u00b7  ".join(
+                        f"{c.replace('_', ' ')}: **{_fmtv(c, _pres.iloc[0][c])}**"
+                        for c in _pres.columns[:4]))
+                else:
+                    _lead = ", ".join(
+                        f"{c.replace('_', ' ')} {_fmtv(c, _pres.iloc[0][c])}"
+                        for c in _pres.columns[:3])
+                    st.markdown(f"**{len(_pres)} result rows \u2014 leading: {_lead}**")
+                _num = [c for c in _pres.columns
+                        if pd.api.types.is_numeric_dtype(_pres[c])]
+                _lab = [c for c in _pres.columns if c not in _num]
+                if len(_pres) >= 3 and _num and _lab:
+                    try:
+                        _series = _pres.set_index(_lab[0])[_num[0]]
+                        if any(k in _lab[0].lower() for k in ("week", "date", "dt")):
+                            st.line_chart(_series)
+                        else:
+                            st.bar_chart(_series)
+                    except Exception:
+                        pass
+                st.dataframe(_pres, hide_index=True, use_container_width=True)
+            elif _psql and _perr is None and _pres is not None:
+                st.caption("The query matched no rows \u2014 this can itself be the "
+                           "finding (e.g., no same-day consolidation pairs in this "
+                           "scope). For improvement questions, the assistant's "
+                           "follow-up offer below runs the full governed diagnostic: "
+                           "root cause, frequency signals, and directional balance.")
+            elif _psql:
+                st.error(f"{'Execution error' if _pok else 'Validation gate'}: {_perr}")
             else:
-                st.caption("Conversational answer — answered from the conversation "
+                st.caption("Conversational answer \u2014 answered from the conversation "
                            "context; no query needed.")
-            st.caption("👇 Full evidence in the expander below: with/without "
+            if _pexpl:
+                st.caption("Method: " + _pexpl[:350]
+                           + ("\u2026" if len(_pexpl) > 350 else ""))
+            if (_pres is not None and _perr is None
+                    and st.session_state.pop("_turn_needs_result", False)):
+                _t2 = st.session_state.get("chat_turns", [])
+                if _t2 and _t2[-1]["q"] == user_query:
+                    _t2[-1]["sem"] += ("\nRESULT (top rows): "
+                                       + str(_pres.head(5).to_dict("records"))[:600])
+            _sg1, _sg2 = st.columns(2)
+            if _sg1.button("\U0001F4CA Break that down by lane", key="sugg_lane"):
+                st.session_state.selected_query = "Break that down by lane"
+                st.session_state.is_preset = False
+                st.session_state.force_run = True
+                st.rerun()
+            if _sg2.button("\U0001F4C8 Show the weekly trend", key="sugg_trend"):
+                st.session_state.selected_query = "How has utilization trended week over week?"
+                st.session_state.is_preset = True
+                st.session_state.force_run = True
+                st.rerun()
+            st.caption("\U0001F447 Full evidence in the expander below: with/without "
                        "comparison, retrieval, gate, ground truth, verdict.")
 
 # ===============================================================
