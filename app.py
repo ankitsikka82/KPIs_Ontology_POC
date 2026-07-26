@@ -1143,26 +1143,27 @@ def truth_consolidation():
     return (text, table, None, facts)
 
 
-def truth_diagnostic():
-    dg = utilization_diagnostic()
-    text = (f"Diagnostic (decompose FIRST): current avg **{dg['current']}%** → achievable "
-            f"**{dg['achievable']}%** (+{dg['uplift']} pts) via "
-            f"{int(dg['moves']['moves_saved'].sum()) if len(dg['moves']) else 0} "
-            f"consolidation move(s), est. **${dg['total_usd']:,}**. Root cause split: "
-            f"{dg['weighed_out_n']} weighed-out loads (full at ~"
-            f"{dg['weighed_out_avg_cube']}% cube — density/pricing lever, NOT planning), "
-            f"{dg['service_prot_n']} service-protection loads (policy). Planning "
-            f"estimate — departure windows/doors/hours unmodeled.")
-    table = dg['moves'] if len(dg['moves']) else None
+def truth_worst_origin():
+    """Planner entry point: WHERE is the problem — one clean, readable answer."""
+    by_o = (utilization.groupby('ORIG_TRML_CD', as_index=False)
+            .agg(avg_utilization=('UTIL_PCT_3', 'mean'), loads=('TRLR_NBR', 'count'))
+            .sort_values('avg_utilization'))
+    by_o['terminal'] = by_o['ORIG_TRML_CD'].map(TERMINAL_NAMES)
+    by_o['avg_utilization'] = by_o['avg_utilization'].round(2)
+    worst = by_o.iloc[0]
+    text = (f"Lowest-utilization origin: **{worst['terminal']}** "
+            f"({worst['ORIG_TRML_CD']}) at **{worst['avg_utilization']}%** over "
+            f"{worst['loads']} loads. Next step for a planner: accept the assistant's "
+            f"offer below to run the scoped improvement diagnostic for this terminal.")
+    table = by_o[['terminal', 'avg_utilization', 'loads']]
+    chart = by_o.set_index('terminal')[['avg_utilization']]
     facts = [
-        ("Distinguishes weighed-out loads (cube not improvable by planning)",
-         [["weighed-out", "weighed out", "weight-constrained", "weighs out", "cnstrnt_cd = 'w'", "cnstrnt_cd='w'"]]),
-        ("Accounts for service-protection loads as policy, not failure",
-         [["service-protection", "shpmt_cnt = 1", "shpmt_cnt=1"]]),
-        ("Recommends consolidation of same-lane same-day eligible loads",
-         [["consolidat"]]),
+        (f"Identifies {worst['terminal']} as lowest",
+         [_terminal_variants(worst['ORIG_TRML_CD'])]),
+        (f"States its average UTIL_PCT_3 ({worst['avg_utilization']}%)",
+         [_fmt_pct_variants(worst['avg_utilization'])]),
     ]
-    return (text, table, None, facts)
+    return (text, table, chart, facts)
 
 
 PRESET_QUESTIONS = {
@@ -1177,7 +1178,7 @@ PRESET_QUESTIONS = {
     "What is our reported utilization?": truth_reported_utilization,
     "What is our overall reported utilization for lanes originating from Springfield?": truth_reported_sgf_lanes,
     "Where can we consolidate trailers this period to save cost?": truth_consolidation,
-    "Why is our utilization low and what can we do about it?": truth_diagnostic,
+    "Which origin terminal has the lowest utilization?": truth_worst_origin,
 }
 
 # Fallback traversal source when Claude's tags are missing or malformed:
@@ -1194,7 +1195,7 @@ PRESET_METRIC_MAP = {
     "What is our reported utilization?": "reported_utilization",
     "What is our overall reported utilization for lanes originating from Springfield?": "reported_utilization",
     "Where can we consolidate trailers this period to save cost?": "consolidation_opportunity",
-    "Why is our utilization low and what can we do about it?": "consolidation_opportunity",
+    "Which origin terminal has the lowest utilization?": "trailer_utilization",
 }
 
 
@@ -1398,11 +1399,13 @@ compute; the engine does the arithmetic; the ontology supplies the meaning.
 Watch the same AI produce two different numbers, read the Verdict, then glance at the
 Action Panel's dollar figures. The whole argument is in that one screen.
 
-🚚 **Planner (5 minutes).** Ask **"How much volume originates from Harrison?"** When
-the assistant offers to check improvement opportunities for Harrison, click yes — then
-type a follow-up like *"which move should I do first?"* and watch the conversation
-carry the analysis. Also try **"Why is our utilization low and what can we do about
-it?"** and compare which side knows that weighed-out freight can't be fixed by planning.
+🚚 **Planner (5 minutes) — see the problem, ask why, get the move.** Click
+**"Which origin terminal has the lowest utilization?"** — one readable table names the
+problem terminal. The assistant then offers to run the improvement diagnostic scoped to
+that terminal: click yes. You get the root-cause split (how much is weighed-out freight
+that planning can't fix, how much is service-protection policy, what is genuinely
+addressable) and the specific consolidation moves with dollar figures. Then type a
+follow-up like *"which move should I do first?"* — the analysis is in the conversation.
 
 🔧 **Engineer (10 minutes).** Run any preset, open the **RAG step** expander to see
 which ontology slices were retrieved and why, check the cache-read token economics
@@ -1447,73 +1450,70 @@ with _d2:
 # ===============================================================
 # ACTION PANEL: from measurement to governed action
 # ===============================================================
-st.header("Action Panel — governed opportunities this period")
-st.caption("Deterministic opportunity surfacing with feasibility screening (rules-based, "
-           "NOT an optimizer — that is the next rung). Eligibility rules, impact formulas, "
-           "and owners are defined in the ontology's ACTION layer, the same way metrics are. "
-           "This panel RECOMPUTES from the data on every load — it looks unchanged here only "
-           "because the demo dataset is fixed; against live gold tables it is a living "
-           "morning report. For the PROMPTED path, ask the assistant below: 'Where can we "
-           "consolidate trailers this period to save cost?' — same rules, conversational "
-           "delivery.")
+with st.expander("🔎 Opportunity Scan — run on demand", expanded=False):
+    st.caption("Nothing here is precomputed furniture: press the button and the "
+               "governed action engines run against the current data — in production, "
+               "against live gold tables, scoped and scheduled. The conversational "
+               "path (the assistant's offer after a relevant question below) invokes "
+               "the same engines.")
+    if st.button("▶ Run opportunity scan", type="primary"):
+        _elig, _rej = find_consolidations()
+        _freq = find_frequency_candidates()
 
-_elig, _rej = find_consolidations()
-_freq = find_frequency_candidates()
+        _a1, _a2 = st.columns(2)
+        with _a1:
+            st.markdown("**Trailer consolidation** · owner: Linehaul load planning")
+            if len(_elig):
+                st.dataframe(_elig, hide_index=True, use_container_width=True)
+                st.success(f"{len(_elig)} eligible pair(s) — est. total saving "
+                           f"${int(_elig['est_saving_usd'].sum()):,} (one avoided pup move each)")
+            else:
+                st.info("No eligible pairs this period.")
+            if len(_rej):
+                with st.expander(f"Screened out by rule ({len(_rej)})"):
+                    st.dataframe(_rej, hide_index=True, use_container_width=True)
+                    st.caption("Physically feasible pairs rejected by INSTITUTIONAL rules — the "
+                               "Priority-hold screen requires the shipment-level join; it is "
+                               "invisible in the utilization fact alone.")
+        with _a2:
+            st.markdown("**Schedule frequency review** · owner: Linehaul network planning")
+            if len(_freq):
+                st.dataframe(_freq, hide_index=True, use_container_width=True)
+                st.success("Candidate(s) below 60% fill at ≥5 schedules/week. Weekly saving per "
+                           "schedule removed; minimum-frequency floor of 3 protects the service "
+                           "standard (SVC_STD_DAYS).")
+            else:
+                st.info("No frequency candidates this period.")
+        st.markdown("---")
+        st.markdown("**Utilization Improvement Diagnostic** — root cause, then the move")
+        _dg = utilization_diagnostic()
+        _d1, _d2, _d3, _d4 = st.columns(4)
+        _d1.metric("Current avg utilization", f"{_dg['current']}%")
+        _d2.metric("Achievable (planning estimate)", f"{_dg['achievable']}%",
+                   delta=f"+{_dg['uplift']} pts")
+        _d3.metric("Moves saved", int(_dg['moves']['moves_saved'].sum()) if len(_dg['moves']) else 0)
+        _d4.metric("Est. saving", f"${_dg['total_usd']:,}")
+        st.caption(f"Root cause FIRST: of {_dg['total_n']} loads, {_dg['weighed_out_n']} are "
+                   f"WEIGHED-OUT (full at ~{_dg['weighed_out_avg_cube']}% cube — freight "
+                   f"density, a pricing/mix lever, NOT a planning failure) and "
+                   f"{_dg['service_prot_n']} are service-protection (policy). The addressable "
+                   f"gap is same-lane same-day loads that legally combine. The achievable "
+                   f"figure is a greedy re-pack PLANNING ESTIMATE — departure windows, door "
+                   f"capacity, and driver hours are unmodeled (departure timestamps: production "
+                   f"data need). Network-wide tradeoffs escalate to formal optimization (MILP).")
+        if len(_dg['moves']):
+            st.dataframe(_dg['moves'], hide_index=True, use_container_width=True)
+            st.success("Each merged pair frees a DISPATCH — driver + tractor + lane miles — "
+                       "not just a trailer. Owner: Linehaul load planning.")
 
-_a1, _a2 = st.columns(2)
-with _a1:
-    st.markdown("**Trailer consolidation** · owner: Linehaul load planning")
-    if len(_elig):
-        st.dataframe(_elig, hide_index=True, use_container_width=True)
-        st.success(f"{len(_elig)} eligible pair(s) — est. total saving "
-                   f"${int(_elig['est_saving_usd'].sum()):,} (one avoided pup move each)")
-    else:
-        st.info("No eligible pairs this period.")
-    if len(_rej):
-        with st.expander(f"Screened out by rule ({len(_rej)})"):
-            st.dataframe(_rej, hide_index=True, use_container_width=True)
-            st.caption("Physically feasible pairs rejected by INSTITUTIONAL rules — the "
-                       "Priority-hold screen requires the shipment-level join; it is "
-                       "invisible in the utilization fact alone.")
-with _a2:
-    st.markdown("**Schedule frequency review** · owner: Linehaul network planning")
-    if len(_freq):
-        st.dataframe(_freq, hide_index=True, use_container_width=True)
-        st.success("Candidate(s) below 60% fill at ≥5 schedules/week. Weekly saving per "
-                   "schedule removed; minimum-frequency floor of 3 protects the service "
-                   "standard (SVC_STD_DAYS).")
-    else:
-        st.info("No frequency candidates this period.")
-st.markdown("---")
-st.markdown("**Utilization Improvement Diagnostic** — root cause, then the move")
-_dg = utilization_diagnostic()
-_d1, _d2, _d3, _d4 = st.columns(4)
-_d1.metric("Current avg utilization", f"{_dg['current']}%")
-_d2.metric("Achievable (planning estimate)", f"{_dg['achievable']}%",
-           delta=f"+{_dg['uplift']} pts")
-_d3.metric("Moves saved", int(_dg['moves']['moves_saved'].sum()) if len(_dg['moves']) else 0)
-_d4.metric("Est. saving", f"${_dg['total_usd']:,}")
-st.caption(f"Root cause FIRST: of {_dg['total_n']} loads, {_dg['weighed_out_n']} are "
-           f"WEIGHED-OUT (full at ~{_dg['weighed_out_avg_cube']}% cube — freight "
-           f"density, a pricing/mix lever, NOT a planning failure) and "
-           f"{_dg['service_prot_n']} are service-protection (policy). The addressable "
-           f"gap is same-lane same-day loads that legally combine. The achievable "
-           f"figure is a greedy re-pack PLANNING ESTIMATE — departure windows, door "
-           f"capacity, and driver hours are unmodeled (departure timestamps: production "
-           f"data need). Network-wide tradeoffs escalate to formal optimization (MILP).")
-if len(_dg['moves']):
-    st.dataframe(_dg['moves'], hide_index=True, use_container_width=True)
-    st.success("Each merged pair frees a DISPATCH — driver + tractor + lane miles — "
-               "not just a trailer. Owner: Linehaul load planning.")
-
-st.caption("Roadmap levers (named, not yet implemented): PLAN-VS-ACTUAL ROUTING "
-           "VARIANCE — compare planned legs (pln_mvmt) against actual routes taken, "
-           "score each human override's outcome (better/worse cube), and learn from "
-           "good deviations; requires actual leg events + an override flag. Also: "
-           "head-haul/backhaul balancing, "
-           "break-terminal vs direct routing, doubles pairing optimization — each is "
-           "eligibility rules + an impact formula in the same ACTION layer, then a MILP "
-           "when network-level tradeoffs demand true optimization.")
+        st.caption("Roadmap levers (named, not yet implemented): PLAN-VS-ACTUAL ROUTING "
+                   "VARIANCE — compare planned legs (pln_mvmt) against actual routes taken, "
+                   "score each human override's outcome (better/worse cube), and learn from "
+                   "good deviations; requires actual leg events + an override flag. Also: "
+                   "head-haul/backhaul balancing, "
+                   "break-terminal vs direct routing, doubles pairing optimization — each is "
+                   "eligibility rules + an impact formula in the same ACTION layer, then a MILP "
+                   "when network-level tradeoffs demand true optimization.")
 
 st.header("Ask About Cube Utilization")
 _h1, _h2 = st.columns([4, 1])
@@ -1530,7 +1530,9 @@ with _h1:
                    "(e.g., ask about reported utilization, then 'break that down by lane').")
 with _h2:
     if st.button("🔄 New chat", use_container_width=True):
-        st.session_state.chat_turns = []
+        for k in ["chat_turns", "selected_query", "last_user_query", "custom_q",
+                  "rag_hits", "rag_engine", "is_preset"]:
+            st.session_state.pop(k, None)
         st.rerun()
 
 if "selected_query" not in st.session_state:
@@ -1549,12 +1551,18 @@ for row_start in range(0, len(_qs), 4):
                 st.session_state.selected_query = q
                 st.session_state.is_preset = True
 
-custom = st.text_input("Or ask your own question:")
-if custom:
-    st.session_state.selected_query = custom
-    st.session_state.is_preset = custom in PRESET_QUESTIONS
+_c1, _c2 = st.columns([5, 1])
+with _c1:
+    custom = st.text_input("Or ask your own question:", key="custom_q")
+with _c2:
+    st.markdown("<div style='height:1.7em'></div>", unsafe_allow_html=True)
+    if st.button("Ask", use_container_width=True, type="primary") and custom.strip():
+        st.session_state.selected_query = custom.strip()
+        st.session_state.is_preset = custom.strip() in PRESET_QUESTIONS
 
 user_query = st.session_state.selected_query
+# run-once: consume the trigger so reruns (including New chat) never re-execute
+st.session_state.selected_query = ""
 
 if user_query:
     st.info(f"Question: {user_query}")
@@ -1925,8 +1933,10 @@ _lq = st.session_state.get("last_user_query", "")
 if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trailer"]):
     _NAME_TO_CODE = {v.lower(): k for k, v in TERMINAL_NAMES.items()}
     _scope_code = None
+    _turns = st.session_state.get("chat_turns", [])
+    _scan = _lq.lower() + " " + (_turns[-1]["sem"].lower() if _turns else "")
     for _nm, _cd in _NAME_TO_CODE.items():
-        if _nm in _lq.lower() or _cd.lower() in _lq.lower().split():
+        if _nm in _scan or f" {_cd.lower()} " in f" {_scan} " or f"({_cd.lower()})" in _scan:
             _scope_code = _cd
             break
     _scope_label = f" for {TERMINAL_NAMES[_scope_code]}-origin lanes" if _scope_code else " (network-wide)"
