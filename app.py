@@ -1350,9 +1350,8 @@ compute; the engine does the arithmetic; the ontology supplies the meaning.
 Watch the same AI produce two different numbers, read the Verdict, then glance at the
 Action Panel's dollar figures. The whole argument is in that one screen.
 
-🚚 **Planner (5 minutes) — see the problem, ask why, get the move.** Click
-**"Which origin terminal has the lowest utilization?"** — one readable table names the
-problem terminal. The assistant then offers to run the improvement diagnostic scoped to
+🚚 **Planner (5 minutes) — see the problem, ask why, get the move.** Press the **🚚 Planner button just below** (or the first preset in the grid) — one
+readable table names the problem terminal. The assistant then offers to run the improvement diagnostic scoped to
 that terminal: click yes. You get the root-cause split (how much is weighed-out freight
 that planning can't fix, how much is service-protection policy, what is genuinely
 addressable) and the specific consolidation moves with dollar figures. Then type a
@@ -1363,6 +1362,28 @@ which ontology slices were retrieved and why, check the cache-read token economi
 under each answer, then open the **Technical Appendix** for the architecture, the live
 knowledge graph, and the validation gate's honest scope.
 """)
+    st.markdown("**▶ Start a path with one click** — each button asks that path's "
+                "first question for you:")
+    _p1, _p2, _p3 = st.columns(3)
+    def _launch(q):
+        st.session_state.selected_query = q
+        st.session_state.is_preset = True
+        st.session_state.force_run = True
+        st.rerun()
+    with _p1:
+        if st.button("🎯 Executive: reported utilization", use_container_width=True,
+                     key="path_exec"):
+            _launch("What is our reported utilization?")
+    with _p2:
+        if st.button("🚚 Planner: lowest origin terminal", use_container_width=True,
+                     key="path_plan"):
+            _launch("Which origin terminal has the lowest utilization?")
+    with _p3:
+        if st.button("🔧 Engineer: run + open the evidence", use_container_width=True,
+                     key="path_eng"):
+            _launch("What is our reported utilization?")
+    st.caption("The scenarios above tell you what to look for; these buttons take "
+               "you there. The same questions are also in the preset grid below.")
 # ===============================================================
 # KPI DASHBOARD: the ANTICIPATED questions (traditional BI world)
 # ===============================================================
@@ -1434,7 +1455,10 @@ if "is_preset" not in st.session_state:
     st.session_state.is_preset = False
 
 st.markdown("**Pick a question:**")
-_qs = list(PRESET_QUESTIONS.keys())
+_FEATURED = ["Which origin terminal has the lowest utilization?",
+             "What is our reported utilization?",
+             "Where can we consolidate trailers this period to save cost?"]
+_qs = _FEATURED + [q for q in PRESET_QUESTIONS if q not in _FEATURED]
 for row_start in range(0, len(_qs), 4):
     row_qs = _qs[row_start:row_start + 4]
     cols = st.columns(4)
