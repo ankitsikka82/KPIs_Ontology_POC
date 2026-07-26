@@ -1445,20 +1445,20 @@ for row_start in range(0, len(_qs), 4):
                 st.session_state.is_preset = True
                 st.session_state.force_run = True
 
-_c1, _c2 = st.columns([5, 1])
-with _c1:
-    custom = st.text_input("Or ask your own question:", key="custom_q")
-with _c2:
-    st.markdown("<div style='height:1.7em'></div>", unsafe_allow_html=True)
-    if st.button("Ask", use_container_width=True, type="primary") and custom.strip():
-        st.session_state.selected_query = custom.strip()
-        st.session_state.is_preset = custom.strip() in PRESET_QUESTIONS
-        st.session_state.force_run = True
 
 user_query = st.session_state.selected_query
 
-if user_query:
-    st.info(f"Question: {user_query}")
+# prior turns render as chat history (the current turn renders as the primary
+# answer below, so skip it here if already recorded)
+_hist = st.session_state.get("chat_turns", [])
+if _hist:
+    _skip_last = bool(user_query) and _hist[-1]["q"] == user_query
+    for _t in (_hist[:-1] if _skip_last else _hist):
+        with st.chat_message("user"):
+            st.write(_t["q"])
+        with st.chat_message("assistant"):
+            st.write(_t["sem"][:400] + ("…" if len(_t["sem"]) > 400 else ""))
+
 
 if user_query and not api_key:
     st.warning("Please set ANTHROPIC_API_KEY or enter it in the sidebar.")
@@ -1479,6 +1479,10 @@ if user_query and api_key:
     raw_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
+EXCEPTION: if the question is conversational or fully answerable from the prior
+turns of this conversation (e.g., prioritizing or explaining results already
+shown), answer directly WITHOUT any SQL block — the system will display your
+text as the answer.
 
 Respond with ONE short sentence explaining your approach, then the query in a ```sql
 fenced block. The system will execute it — do not fabricate result numbers.
@@ -1492,6 +1496,10 @@ fenced block. The system will execute it — do not fabricate result numbers.
     semantic_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
+EXCEPTION: if the question is conversational or fully answerable from the prior
+turns of this conversation (e.g., prioritizing or explaining results already
+shown), answer directly WITHOUT any SQL block — the system will display your
+text as the answer.
 
 Respond with ONE short sentence explaining your approach (naming the metric
 definition you followed), then the query in a ```sql fenced block. The system will
@@ -1572,310 +1580,360 @@ governed layer. The ontology is not a workaround for today's model weaknesses; i
 the one part of the stack that better models can never replace.
 """)
 
-    with st.expander("RAG step: semantic context retrieved for this question"):
-        st.caption(f"Retrieval engine: {st.session_state.get('rag_engine', '')} — the "
-                   "vector index is over the ONTOLOGY's definitions, not the data. Core "
-                   "invariants (decodes, column authority, temporal rules) always ship; "
-                   "these chunks were retrieved for this question. At 500+ metrics this "
-                   "step is what keeps the prompt small — production swaps this in-memory "
-                   "index for Databricks Vector Search.")
-        for (cid, kind, text), score in st.session_state.get("rag_hits", []):
-            st.markdown(f"**`{cid}`** · " + ("dependency-included"
-                        if score < 0 else f"similarity {score:.3f}"))
-            st.caption(text[:300] + ("…" if len(text) > 300 else ""))
+    st.session_state.primary_answer_slot = st.container()
+    with st.expander("🔬 How this answer was produced — with/without comparison, RAG retrieval, validation gate, ground truth, verdict", expanded=False):
+        st.markdown("#### RAG step — semantic context retrieved for this question")
+        if True:
+            st.caption(f"Retrieval engine: {st.session_state.get('rag_engine', '')} — the "
+                       "vector index is over the ONTOLOGY's definitions, not the data. Core "
+                       "invariants (decodes, column authority, temporal rules) always ship; "
+                       "these chunks were retrieved for this question. At 500+ metrics this "
+                       "step is what keeps the prompt small — production swaps this in-memory "
+                       "index for Databricks Vector Search.")
+            for (cid, kind, text), score in st.session_state.get("rag_hits", []):
+                st.markdown(f"**`{cid}`** · " + ("dependency-included"
+                            if score < 0 else f"similarity {score:.3f}"))
+                st.caption(text[:300] + ("…" if len(text) > 300 else ""))
 
-    col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2)
 
-    def _render_side(container, response_text, elapsed, usage, side_key, extra_note=""):
-        """Shared rendering: explanation, generated SQL, validation, execution."""
-        with container:
-            sql = extract_sql(response_text)
-            explanation = response_text.split("```")[0].strip()
-            st.write(explanation)
-            ok, sql_or_reason = validate_sql(sql)
-            if not ok:
-                st.error(f"Query failed the validation gate: {sql_or_reason}")
-                st.session_state[side_key] = explanation
-            else:
-                st.markdown("**Generated SQL:**")
-                st.code(sql_or_reason, language="sql")
-                result, err = run_sql(sql_or_reason)
-                if err is None:
-                    st.session_state[side_key + "_tables"] = sorted(
-                        set(m.lower() for m in re.findall(
-                            r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", sql_or_reason))
-                        & ALLOWED_TABLES)
-                if err:
-                    st.error(f"Execution error (surfaced honestly — this is why the "
-                             f"validation gate exists): {err}")
-                    st.session_state[side_key] = explanation + "\n" + sql_or_reason
-                else:
-                    st.markdown("**Executed result** — Claude wrote this SQL (the decision); "
-                                "the DuckDB engine ran it (the arithmetic; production: "
-                                "Databricks SQL):")
-                    st.dataframe(result, hide_index=True, use_container_width=True)
-                    st.session_state[side_key] = (explanation + "\n" + sql_or_reason
-                                                  + "\n" + result.to_string(index=False))
-            cache_w = getattr(usage, "cache_creation_input_tokens", 0) or 0
-            cache_r = getattr(usage, "cache_read_input_tokens", 0) or 0
-            st.caption(f"⏱ {elapsed:.1f}s · {MODEL_ID} · tokens: {usage.input_tokens:,} fresh in, "
-                       f"{cache_w:,} cache-write, {cache_r:,} cache-read (~10% price) / "
-                       f"{usage.output_tokens:,} out (budget: 3,000 — same both sides"
-                       f"{extra_note}). First question warms the cache; "
-                       f"repeat questions reuse the identical stable prefix; retrieved "
-                       f"slices are processed fresh each question.")
-
-    with col1:
-        st.subheader("Without Semantic Ontology")
-        st.caption("Claude writes SQL from raw schemas alone")
-        with st.spinner("Generating query..."):
-            try:
-                t0 = time.time()
-                _ec = st.session_state.get("exec_cache", {})
-                _forced = st.session_state.pop("force_run", False)
-                _stale = (_ec.get("q") != user_query or _ec.get("model") != MODEL_ID)
-                _fresh = _forced or _stale or "raw_text" not in _ec
-                _fresh_sem = _forced or _stale or "sem_text" not in _ec
-                if _fresh:
-                    response_raw = client.messages.create(
-                        model=MODEL_ID,
-                        max_tokens=3000,
-                        system=raw_system,
-                        messages=build_messages("raw", user_query)
-                    )
-                    _u = response_raw.usage
-                    if _stale or _forced:
-                        st.session_state.exec_cache = {}
-                    st.session_state.exec_cache.update({"q": user_query, "model": MODEL_ID,
-                        "raw_text": response_text_of(response_raw),
-                        "raw_usage": {"input_tokens": _u.input_tokens,
-                                      "output_tokens": _u.output_tokens,
-                                      "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
-                                      "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}})
-                import types as _t2
-                _c = st.session_state.get("exec_cache", {})
-                if "raw_text" not in _c:
-                    raise RuntimeError("No cached response — re-ask the question.")
-                class _RawResp: pass
-                response_raw = _RawResp()
-                response_raw.content = [_t2.SimpleNamespace(text=_c["raw_text"])]
-                response_raw.usage = _t2.SimpleNamespace(**_c["raw_usage"])
-                _render_side(st.container(), response_raw.content[0].text,
-                             time.time() - t0, response_raw.usage, "raw_out")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-                st.session_state.raw_out = None
-
-    with col2:
-        st.subheader("With Semantic Ontology")
-        st.caption("Claude writes SQL guided by metric definitions and business rules")
-        with st.spinner("Generating query..."):
-            try:
-                t0 = time.time()
-                if _fresh_sem:
-                    response_semantic = client.messages.create(
-                        model=MODEL_ID,
-                        max_tokens=3000,
-                        system=semantic_system,
-                        messages=build_messages("sem", user_query)
-                    )
-                    _u2 = response_semantic.usage
-                    st.session_state.exec_cache.update({
-                        "sem_text": response_text_of(response_semantic),
-                        "sem_usage": {"input_tokens": _u2.input_tokens,
-                                      "output_tokens": _u2.output_tokens,
-                                      "cache_creation_input_tokens": getattr(_u2, "cache_creation_input_tokens", 0) or 0,
-                                      "cache_read_input_tokens": getattr(_u2, "cache_read_input_tokens", 0) or 0}})
-                import types as _t3
-                _c2 = st.session_state.get("exec_cache", {})
-                if "sem_text" not in _c2:
-                    raise RuntimeError("No cached semantic response — the raw side "
-                                       "likely failed this run; re-ask the question.")
-                class _SemResp: pass
-                response_semantic = _SemResp()
-                response_semantic.content = [_t3.SimpleNamespace(text=_c2["sem_text"])]
-                response_semantic.usage = _t3.SimpleNamespace(**_c2["sem_usage"])
-                sem_elapsed = time.time() - t0
-                response_text = response_semantic.content[0].text
-                if _fresh_sem:
-                    st.session_state.setdefault("chat_turns", []).append({
-                        "q": user_query,
-                        "raw": _turn_summary(response_raw.content[0].text),
-                        "sem": _turn_summary(response_text),
-                    })
-
-                used_entities, used_rels, used_metric = [], [], None
-                answer_lines = []
-                for line in response_text.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("TRACE:"):
-                        body = stripped.split(":", 1)[1]
-                        for part in body.split(";"):
-                            part = part.strip()
-                            if part.lower().startswith("metric="):
-                                m = part.split("=", 1)[1].strip()
-                                if m in ontology.get("metrics", {}):
-                                    used_metric = m
-                            elif part.lower().startswith("entities="):
-                                used_entities = [e.strip() for e in
-                                                 part.split("=", 1)[1].split(",")
-                                                 if e.strip() in ontology["entities"]]
-                    elif stripped.startswith("ENTITIES_USED:"):  # legacy fallback
-                        used_entities = [e.strip() for e in
-                                         stripped.split(":", 1)[1].split(",")
-                                         if e.strip() in ontology["entities"]]
-                    elif stripped.startswith("METRIC_USED:"):
-                        m = stripped.split(":", 1)[1].strip()
-                        if m in ontology.get("metrics", {}):
-                            used_metric = m
-                    elif stripped.startswith("RELATIONSHIPS_USED:"):
-                        used_rels = [r.strip() for r in
-                                     stripped.split(":", 1)[1].split(",")
-                                     if r.strip() in ontology["relationships"]]
+        def _render_side(container, response_text, elapsed, usage, side_key, extra_note=""):
+            """Shared rendering: explanation, generated SQL, validation, execution."""
+            with container:
+                sql = extract_sql(response_text)
+                explanation = response_text.split("```")[0].strip()
+                st.write(explanation)
+                if sql is None:
+                    st.caption("Conversational answer — no query needed (answered from "
+                               "the conversation context).")
+                    st.session_state[side_key] = explanation
+                    ok, sql_or_reason = False, None
+                elif True:
+                    ok, sql_or_reason = validate_sql(sql)
+                if sql is not None and not ok:
+                    st.error(f"Query failed the validation gate: {sql_or_reason}")
+                    st.session_state[side_key] = explanation
+                elif sql is not None:
+                    st.markdown("**Generated SQL:**")
+                    st.code(sql_or_reason, language="sql")
+                    result, err = run_sql(sql_or_reason)
+                    if err is None:
+                        st.session_state[side_key + "_tables"] = sorted(
+                            set(m.lower() for m in re.findall(
+                                r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", sql_or_reason))
+                            & ALLOWED_TABLES)
+                    if err:
+                        st.error(f"Execution error (surfaced honestly — this is why the "
+                                 f"validation gate exists): {err}")
+                        st.session_state[side_key] = explanation + "\n" + sql_or_reason
                     else:
-                        answer_lines.append(line)
-                answer_text = "\n".join(answer_lines)
+                        st.markdown("**Executed result** — Claude wrote this SQL (the decision); "
+                                    "the DuckDB engine ran it (the arithmetic; production: "
+                                    "Databricks SQL):")
+                        st.dataframe(result, hide_index=True, use_container_width=True)
+                        st.session_state[side_key] = (explanation + "\n" + sql_or_reason
+                                                      + "\n" + result.to_string(index=False))
+                cache_w = getattr(usage, "cache_creation_input_tokens", 0) or 0
+                cache_r = getattr(usage, "cache_read_input_tokens", 0) or 0
+                st.caption(f"⏱ {elapsed:.1f}s · {MODEL_ID} · tokens: {usage.input_tokens:,} fresh in, "
+                           f"{cache_w:,} cache-write, {cache_r:,} cache-read (~10% price) / "
+                           f"{usage.output_tokens:,} out (budget: 3,000 — same both sides"
+                           f"{extra_note}). First question warms the cache; "
+                           f"repeat questions reuse the identical stable prefix; retrieved "
+                           f"slices are processed fresh each question.")
 
-                TABLE_ENTITIES = {
-                    "shpmt_mstr": ["Shipment"],
-                    "lh_dsptch": ["Trailer", "Dispatch"],
-                    "trlr_util_fct": ["Trailer", "Lane"],
-                    "pln_mvmt": ["Shipment", "Terminal"],
-                    "lane_ref": ["Lane"],
-                }
-                _cur_sql = extract_sql(answer_text) or ""
-                sql_tables = sorted(set(
-                    m2.lower() for m2 in re.findall(
-                        r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", _cur_sql))
-                    & ALLOWED_TABLES)
-                st.session_state.sem_physical_tables = sql_tables
-                # SEMANTIC INTENT: the metric's declared entities are primary;
-                # table-derived entities only as fallback when no metric declared
-                if used_metric and used_metric in ontology.get("metrics", {}):
-                    used_entities = ontology["metrics"][used_metric].get(
-                        "entities", used_entities)
-                elif not used_entities:
-                    derived = []
-                    for t in sql_tables:
-                        for e in TABLE_ENTITIES.get(t, []):
-                            if e not in derived:
-                                derived.append(e)
-                    used_entities = derived
-                if not used_entities and user_query in PRESET_METRIC_MAP:
-                    used_metric = PRESET_METRIC_MAP[user_query]
-                    used_entities = ontology.get("metrics", {}).get(
-                        used_metric, {}).get("entities", ["Trailer", "Lane"])
+        with col1:
+            st.subheader("Without Semantic Ontology")
+            st.caption("Claude writes SQL from raw schemas alone")
+            with st.spinner("Generating query..."):
+                try:
+                    t0 = time.time()
+                    _ec = st.session_state.get("exec_cache", {})
+                    _forced = st.session_state.pop("force_run", False)
+                    _stale = (_ec.get("q") != user_query or _ec.get("model") != MODEL_ID)
+                    _fresh = _forced or _stale or "raw_text" not in _ec
+                    _fresh_sem = _forced or _stale or "sem_text" not in _ec
+                    if _fresh:
+                        response_raw = client.messages.create(
+                            model=MODEL_ID,
+                            max_tokens=3000,
+                            system=raw_system,
+                            messages=build_messages("raw", user_query)
+                        )
+                        _u = response_raw.usage
+                        if _stale or _forced:
+                            st.session_state.exec_cache = {}
+                        st.session_state.exec_cache.update({"q": user_query, "model": MODEL_ID,
+                            "raw_text": response_text_of(response_raw),
+                            "raw_usage": {"input_tokens": _u.input_tokens,
+                                          "output_tokens": _u.output_tokens,
+                                          "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
+                                          "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}})
+                    import types as _t2
+                    _c = st.session_state.get("exec_cache", {})
+                    if "raw_text" not in _c:
+                        raise RuntimeError("No cached response — re-ask the question.")
+                    class _RawResp: pass
+                    response_raw = _RawResp()
+                    response_raw.content = [_t2.SimpleNamespace(text=_c["raw_text"])]
+                    response_raw.usage = _t2.SimpleNamespace(**_c["raw_usage"])
+                    _render_side(st.container(), response_raw.content[0].text,
+                                 time.time() - t0, response_raw.usage, "raw_out")
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+                    st.session_state.raw_out = None
 
-                _render_side(st.container(), answer_text, sem_elapsed,
-                             response_semantic.usage, "sem_out",
-                             extra_note="; input is larger because the ontology travels in the prompt")
-                st.session_state.traversal = (used_entities, used_rels, used_metric)
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-                st.session_state.sem_out = None
+        with col2:
+            st.subheader("With Semantic Ontology")
+            st.caption("Claude writes SQL guided by metric definitions and business rules")
+            with st.spinner("Generating query..."):
+                try:
+                    t0 = time.time()
+                    if _fresh_sem:
+                        response_semantic = client.messages.create(
+                            model=MODEL_ID,
+                            max_tokens=3000,
+                            system=semantic_system,
+                            messages=build_messages("sem", user_query)
+                        )
+                        _u2 = response_semantic.usage
+                        st.session_state.exec_cache.update({
+                            "sem_text": response_text_of(response_semantic),
+                            "sem_usage": {"input_tokens": _u2.input_tokens,
+                                          "output_tokens": _u2.output_tokens,
+                                          "cache_creation_input_tokens": getattr(_u2, "cache_creation_input_tokens", 0) or 0,
+                                          "cache_read_input_tokens": getattr(_u2, "cache_read_input_tokens", 0) or 0}})
+                    import types as _t3
+                    _c2 = st.session_state.get("exec_cache", {})
+                    if "sem_text" not in _c2:
+                        raise RuntimeError("No cached semantic response — the raw side "
+                                           "likely failed this run; re-ask the question.")
+                    class _SemResp: pass
+                    response_semantic = _SemResp()
+                    response_semantic.content = [_t3.SimpleNamespace(text=_c2["sem_text"])]
+                    response_semantic.usage = _t3.SimpleNamespace(**_c2["sem_usage"])
+                    sem_elapsed = time.time() - t0
+                    response_text = response_semantic.content[0].text
+                    if _fresh_sem:
+                        _turns = st.session_state.setdefault("chat_turns", [])
+                        _new_turn = {
+                            "q": user_query,
+                            "raw": _turn_summary(response_raw.content[0].text),
+                            "sem": _turn_summary(response_text),
+                        }
+                        if _turns and _turns[-1]["q"] == user_query:
+                            _turns[-1] = _new_turn  # re-ask replaces, never duplicates
+                        else:
+                            _turns.append(_new_turn)
 
-    # -----------------------------------------------------------
-    # TRAVERSAL: which parts of the ontology this query touched
-    # -----------------------------------------------------------
-    used_entities, used_rels, used_metric = st.session_state.get("traversal", ([], [], None))
-    if used_entities:
-        st.header("Semantic Context Selected for This Query")
-        st.caption(f"SEMANTIC INTENT (orange): the entities declared by the metric "
-                   f"definition the model followed. PHYSICAL EVIDENCE: the executed SQL "
-                   f"referenced table(s) "
-                   f"{', '.join(st.session_state.get('sem_physical_tables', [])) or '—'}. "
-                   f"Production derives dimensions/filters/joins via SQL AST parsing.")
-        kg_legend(mode="traversal")
-        render_kg(build_kg(highlight_entities=used_entities,
-                           highlight_relationships=used_rels,
-                           highlight_metrics=[used_metric] if used_metric else [],
-                           height="480px", mode="traversal"),
-                  "kg_traversal.html", render_height=500)
-        rel_phrases = [f"**{ontology['relationships'][r]['from_entity']}** "
-                       f"{r.replace('_', ' ').replace(ontology['relationships'][r]['from_entity'], '').replace(ontology['relationships'][r]['to_entity'], '').strip()} "
-                       f"**{ontology['relationships'][r]['to_entity']}**"
-                       for r in used_rels]
-        narration = ""
-        if used_metric:
-            narration += (f"To answer this, Claude followed the **{used_metric}** "
-                          f"metric definition, ")
-        else:
-            narration += "To answer this, Claude "
-        narration += "used the definitions of " + \
-            ", ".join(f"**{e}**" for e in used_entities) + "."
-        if rel_phrases:
-            narration += " It connected them through: " + "; ".join(rel_phrases) + "."
-        st.markdown(narration)
+                    used_entities, used_rels, used_metric = [], [], None
+                    answer_lines = []
+                    for line in response_text.splitlines():
+                        stripped = line.strip()
+                        if stripped.startswith("TRACE:"):
+                            body = stripped.split(":", 1)[1]
+                            for part in body.split(";"):
+                                part = part.strip()
+                                if part.lower().startswith("metric="):
+                                    m = part.split("=", 1)[1].strip()
+                                    if m in ontology.get("metrics", {}):
+                                        used_metric = m
+                                elif part.lower().startswith("entities="):
+                                    used_entities = [e.strip() for e in
+                                                     part.split("=", 1)[1].split(",")
+                                                     if e.strip() in ontology["entities"]]
+                        elif stripped.startswith("ENTITIES_USED:"):  # legacy fallback
+                            used_entities = [e.strip() for e in
+                                             stripped.split(":", 1)[1].split(",")
+                                             if e.strip() in ontology["entities"]]
+                        elif stripped.startswith("METRIC_USED:"):
+                            m = stripped.split(":", 1)[1].strip()
+                            if m in ontology.get("metrics", {}):
+                                used_metric = m
+                        elif stripped.startswith("RELATIONSHIPS_USED:"):
+                            used_rels = [r.strip() for r in
+                                         stripped.split(":", 1)[1].split(",")
+                                         if r.strip() in ontology["relationships"]]
+                        else:
+                            answer_lines.append(line)
+                    answer_text = "\n".join(answer_lines)
 
-    # -----------------------------------------------------------
-    # GROUND TRUTH: matches the question that was asked
-    # -----------------------------------------------------------
-    st.header("Verified Ground Truth")
-    st.caption("Computed directly from the CSVs with pandas — no LLM involved. "
-               "Use it to check both responses above.")
+                    TABLE_ENTITIES = {
+                        "shpmt_mstr": ["Shipment"],
+                        "lh_dsptch": ["Trailer", "Dispatch"],
+                        "trlr_util_fct": ["Trailer", "Lane"],
+                        "pln_mvmt": ["Shipment", "Terminal"],
+                        "lane_ref": ["Lane"],
+                    }
+                    _cur_sql = extract_sql(answer_text) or ""
+                    sql_tables = sorted(set(
+                        m2.lower() for m2 in re.findall(
+                            r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", _cur_sql))
+                        & ALLOWED_TABLES)
+                    st.session_state.sem_physical_tables = sql_tables
+                    # SEMANTIC INTENT: the metric's declared entities are primary;
+                    # table-derived entities only as fallback when no metric declared
+                    if used_metric and used_metric in ontology.get("metrics", {}):
+                        used_entities = ontology["metrics"][used_metric].get(
+                            "entities", used_entities)
+                    elif not used_entities:
+                        derived = []
+                        for t in sql_tables:
+                            for e in TABLE_ENTITIES.get(t, []):
+                                if e not in derived:
+                                    derived.append(e)
+                        used_entities = derived
+                    if not used_entities and user_query in PRESET_METRIC_MAP:
+                        used_metric = PRESET_METRIC_MAP[user_query]
+                        used_entities = ontology.get("metrics", {}).get(
+                            used_metric, {}).get("entities", ["Trailer", "Lane"])
 
-    if user_query in PRESET_QUESTIONS:
-        title, table, chart, facts = PRESET_QUESTIONS[user_query]()
-        st.markdown(title)
-        gt1, gt2 = st.columns([1, 1]) if chart is not None else (st.container(), None)
-        if chart is not None:
-            with gt1:
-                st.dataframe(table, hide_index=True, use_container_width=True)
-            with gt2:
-                if user_query == "How has utilization trended week over week?":
-                    st.line_chart(chart)
-                else:
-                    st.bar_chart(chart)
-        else:
-            st.dataframe(table, hide_index=True, use_container_width=True)
+                    _render_side(st.container(), answer_text, sem_elapsed,
+                                 response_semantic.usage, "sem_out",
+                                 extra_note="; input is larger because the ontology travels in the prompt")
+                    st.session_state.traversal = (used_entities, used_rels, used_metric)
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+                    st.session_state.sem_out = None
 
-        # -------------------------------------------------------
-        # VERDICT: automated fact check of both responses
-        # -------------------------------------------------------
-        raw_out = st.session_state.get("raw_out")
-        sem_out = st.session_state.get("sem_out")
-        if raw_out and sem_out and facts:
-            st.header("Verdict: Automated Fact Check")
-            st.caption("Each key fact below is computed from the data with pandas, then "
-                       "checked for presence in each response (POC-grade string/number "
-                       "matching — production would use structured output + exact eval).")
-            raw_checks = check_facts(facts, raw_out)
-            sem_checks = check_facts(facts, sem_out)
-            verdict_df = pd.DataFrame({
-                "Verified fact (from data)": [label for label, _ in raw_checks],
-                "Without ontology": ["✅" if ok else "❌" for _, ok in raw_checks],
-                "With ontology": ["✅" if ok else "❌" for _, ok in sem_checks],
-            })
-            st.dataframe(verdict_df, hide_index=True, use_container_width=True)
-            raw_score = sum(ok for _, ok in raw_checks)
-            sem_score = sum(ok for _, ok in sem_checks)
-            n = len(facts)
-            if sem_score > raw_score:
-                st.success(f"With ontology matched {sem_score}/{n} verified facts; "
-                           f"without ontology matched {raw_score}/{n}. "
-                           f"The semantic layer produced the more accurate answer.")
-            elif sem_score == raw_score == n:
-                st.info(f"Both responses matched all {n} verified facts on this question. "
-                        f"The ontology's value shows most on ambiguous grain, sorting, and "
-                        f"time questions — and in consistency across repeated runs.")
-            elif sem_score == raw_score:
-                st.warning(f"Both matched {sem_score}/{n} verified facts. Inspect the "
-                           f"responses above against the ground truth table.")
+        # -----------------------------------------------------------
+        # TRAVERSAL: which parts of the ontology this query touched
+        # -----------------------------------------------------------
+        used_entities, used_rels, used_metric = st.session_state.get("traversal", ([], [], None))
+        if used_entities:
+            st.header("Semantic Context Selected for This Query")
+            st.caption(f"SEMANTIC INTENT (orange): the entities declared by the metric "
+                       f"definition the model followed. PHYSICAL EVIDENCE: the executed SQL "
+                       f"referenced table(s) "
+                       f"{', '.join(st.session_state.get('sem_physical_tables', [])) or '—'}. "
+                       f"Production derives dimensions/filters/joins via SQL AST parsing.")
+            kg_legend(mode="traversal")
+            render_kg(build_kg(highlight_entities=used_entities,
+                               highlight_relationships=used_rels,
+                               highlight_metrics=[used_metric] if used_metric else [],
+                               height="480px", mode="traversal"),
+                      "kg_traversal.html", render_height=500)
+            rel_phrases = [f"**{ontology['relationships'][r]['from_entity']}** "
+                           f"{r.replace('_', ' ').replace(ontology['relationships'][r]['from_entity'], '').replace(ontology['relationships'][r]['to_entity'], '').strip()} "
+                           f"**{ontology['relationships'][r]['to_entity']}**"
+                           for r in used_rels]
+            narration = ""
+            if used_metric:
+                narration += (f"To answer this, Claude followed the **{used_metric}** "
+                              f"metric definition, ")
             else:
-                st.error(f"Without ontology matched {raw_score}/{n}; with ontology "
-                         f"matched {sem_score}/{n}. LLM responses vary — rerun the "
-                         f"question, and inspect what the semantic side missed. This is "
-                         f"why production needs repeated evals, not single runs.")
-    else:
-        st.markdown("Custom question — no precomputed check for it. "
-                    "Key verified stats for manual comparison:")
-        stats1, stats2, stats3 = st.columns(3)
-        stats1.metric("Trailers", len(utilization))
-        stats2.metric("Avg actual utilization",
-                      f"{utilization['UTIL_PCT_3'].mean():.1f}%")
-        stats3.metric("Total shipments", len(shipments))
-        with st.expander("Full utilization table (for manual verification)"):
-            st.dataframe(utilization, hide_index=True, use_container_width=True)
+                narration += "To answer this, Claude "
+            narration += "used the definitions of " + \
+                ", ".join(f"**{e}**" for e in used_entities) + "."
+            if rel_phrases:
+                narration += " It connected them through: " + "; ".join(rel_phrases) + "."
+            st.markdown(narration)
+
+        # -----------------------------------------------------------
+        # GROUND TRUTH: matches the question that was asked
+        # -----------------------------------------------------------
+        st.header("Verified Ground Truth")
+        _sem_cached = st.session_state.get("exec_cache", {}).get("sem_text", "")
+        if _sem_cached and extract_sql(_sem_cached) is None:
+            st.info("This was a CONVERSATIONAL turn — the assistant answered from "
+                    "prior context without executing a query, so there is no result "
+                    "to fact-check. The stats below describe the underlying data for "
+                    "reference; treat the conversational answer as reasoning, not as "
+                    "a verified measurement.")
+        st.caption("Computed directly from the CSVs with pandas — no LLM involved. "
+                   "Use it to check both responses above.")
+
+        if user_query in PRESET_QUESTIONS:
+            title, table, chart, facts = PRESET_QUESTIONS[user_query]()
+            st.markdown(title)
+            gt1, gt2 = st.columns([1, 1]) if chart is not None else (st.container(), None)
+            if chart is not None:
+                with gt1:
+                    st.dataframe(table, hide_index=True, use_container_width=True)
+                with gt2:
+                    if user_query == "How has utilization trended week over week?":
+                        st.line_chart(chart)
+                    else:
+                        st.bar_chart(chart)
+            else:
+                st.dataframe(table, hide_index=True, use_container_width=True)
+
+            # -------------------------------------------------------
+            # VERDICT: automated fact check of both responses
+            # -------------------------------------------------------
+            raw_out = st.session_state.get("raw_out")
+            sem_out = st.session_state.get("sem_out")
+            if raw_out and sem_out and facts:
+                st.header("Verdict: Automated Fact Check")
+                st.caption("Each key fact below is computed from the data with pandas, then "
+                           "checked for presence in each response (POC-grade string/number "
+                           "matching — production would use structured output + exact eval).")
+                raw_checks = check_facts(facts, raw_out)
+                sem_checks = check_facts(facts, sem_out)
+                verdict_df = pd.DataFrame({
+                    "Verified fact (from data)": [label for label, _ in raw_checks],
+                    "Without ontology": ["✅" if ok else "❌" for _, ok in raw_checks],
+                    "With ontology": ["✅" if ok else "❌" for _, ok in sem_checks],
+                })
+                st.dataframe(verdict_df, hide_index=True, use_container_width=True)
+                raw_score = sum(ok for _, ok in raw_checks)
+                sem_score = sum(ok for _, ok in sem_checks)
+                n = len(facts)
+                if sem_score > raw_score:
+                    st.success(f"With ontology matched {sem_score}/{n} verified facts; "
+                               f"without ontology matched {raw_score}/{n}. "
+                               f"The semantic layer produced the more accurate answer.")
+                elif sem_score == raw_score == n:
+                    st.info(f"Both responses matched all {n} verified facts on this question. "
+                            f"The ontology's value shows most on ambiguous grain, sorting, and "
+                            f"time questions — and in consistency across repeated runs.")
+                elif sem_score == raw_score:
+                    st.warning(f"Both matched {sem_score}/{n} verified facts. Inspect the "
+                               f"responses above against the ground truth table.")
+                else:
+                    st.error(f"Without ontology matched {raw_score}/{n}; with ontology "
+                             f"matched {sem_score}/{n}. LLM responses vary — rerun the "
+                             f"question, and inspect what the semantic side missed. This is "
+                             f"why production needs repeated evals, not single runs.")
+        else:
+            st.markdown("Custom question — no precomputed check for it. "
+                        "Key verified stats for manual comparison:")
+            stats1, stats2, stats3 = st.columns(3)
+            stats1.metric("Trailers", len(utilization))
+            stats2.metric("Avg actual utilization",
+                          f"{utilization['UTIL_PCT_3'].mean():.1f}%")
+            stats3.metric("Total shipments", len(shipments))
+            with st.expander("Full utilization table (for manual verification)"):
+                st.dataframe(utilization, hide_index=True, use_container_width=True)
+
+
+    # ---- PRIMARY CHAT ANSWER (fills the slot ABOVE the evidence expander) ----
+    _pc = st.session_state.get("exec_cache", {})
+    with st.session_state.primary_answer_slot:
+        with st.chat_message("user"):
+            st.write(user_query)
+        with st.chat_message("assistant"):
+            _ptxt = _pc.get("sem_text", "")
+            _pans = "\n".join(l for l in _ptxt.splitlines()
+                              if not l.strip().startswith("TRACE:"))
+            _pexpl = _pans.split("```")[0].strip()
+            st.write(_pexpl or "(no answer)")
+            _psql = extract_sql(_pans)
+            if _psql:
+                _pok, _pbody = validate_sql(_psql)
+                if _pok:
+                    _pres, _perr = run_sql(_pbody)
+                    if _perr is None:
+                        st.dataframe(_pres, hide_index=True, use_container_width=True)
+                    else:
+                        st.error(f"Execution error: {_perr}")
+                else:
+                    st.error(f"Validation gate: {_pbody}")
+            else:
+                st.caption("Conversational answer — answered from the conversation "
+                           "context; no query needed.")
+            st.caption("👇 Full evidence in the expander below: with/without "
+                       "comparison, retrieval, gate, ground truth, verdict.")
 
 # ===============================================================
 # CONVERSATIONAL ACTION OFFER: the assistant proposes the next step,
@@ -1883,7 +1941,9 @@ the one part of the stack that better models can never replace.
 # (get_diagnostic(scope)); here, orchestration invokes the engine.
 # ===============================================================
 _lq = st.session_state.get("last_user_query", "")
-if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trailer"]):
+if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trailer",
+                                          "move", "consolidat", "improve", "opportun",
+                                          "lane", "terminal"]):
     _NAME_TO_CODE = {v.lower(): k for k, v in TERMINAL_NAMES.items()}
     _turns = st.session_state.get("chat_turns", [])
     _scan = _lq.lower() + " " + (_turns[-1]["sem"].lower() if _turns else "")
@@ -1961,6 +2021,13 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
             })
             st.caption("This analysis is now in the chat context — ask a follow-up "
                        "about it below.")
+
+_chatq = st.chat_input("Ask a question or follow up — context carries automatically…")
+if _chatq and _chatq.strip():
+    st.session_state.selected_query = _chatq.strip()
+    st.session_state.is_preset = _chatq.strip() in PRESET_QUESTIONS
+    st.session_state.force_run = True
+    st.rerun()  # deliberate: the run block above already executed this cycle
 
 # ===============================================================
 # TECHNICAL APPENDIX: architecture + the live semantic model
