@@ -176,6 +176,10 @@ ontology = {
                 "steward": "Decision Science (technical)"
             }
         },
+        "recommendation_granularity": {
+            "rule": "A recommendation must be scoped to the FINEST granularity at which its evidence holds, and NO finer. The ladder: load/date (specific consolidation pair) -> lane+day-of-week (trim one departure, reroute on concentrated days) -> lane (frequency review) -> lane pair (directional balance) -> network (MILP escalation). Day-of-week findings require min_dow_load_count observed loads on that DOW for that lane; below the bar, state that evidence supports the coarser grain only. Never issue a lane-wide action when the pattern is day-specific, and never claim a day-specific pattern from insufficient samples.",
+            "parameters": {"min_dow_load_count": 3}
+        },
         "capacity_status": {
             "rule": "DOMINANT CONSTRAINT (CNSTRNT_CD) and CAPACITY STATUS are different concepts. A load is WEIGHED-OUT only when UTIL_PCT_2 >= weighed_out_min_pct, CUBED-OUT only when UTIL_PCT_1 >= cubed_out_min_pct; either makes it capacity-constrained (effectively full — additional freight cannot be added, so its utilization is not a planning failure). A weight-DOMINANT load below threshold is simply underutilized and MAY be addressable by planning.",
             "parameters": {"weighed_out_min_pct": 90, "cubed_out_min_pct": 90}
@@ -285,6 +289,7 @@ ontology = {
                 "same_operating_day_required": True
             },
             "impact_formula": "est_saving_usd = LANE_MILES * CPM_USD from lane_ref (one avoided pup move)",
+            "granularity": "load/date (specific pair, specific dispatch date)",
             "owner": "Linehaul load planning",
             "provenance": {"policy": "Linehaul Consolidation Guidelines", "effective": "demo placeholder"},
             "sql_equivalent": "SELECT a.TRLR_NBR AS trailer_1, b.TRLR_NBR AS trailer_2, a.ORIG_TRML_CD, a.DEST_TRML_CD, a.LH_DSPTCH_DT, a.LD_CUBE_FT + b.LD_CUBE_FT AS combined_cube, a.LD_WGT_LB + b.LD_WGT_LB AS combined_wgt, r.LANE_MILES * r.CPM_USD AS est_saving_usd FROM trlr_util_fct a JOIN trlr_util_fct b ON a.ORIG_TRML_CD = b.ORIG_TRML_CD AND a.DEST_TRML_CD = b.DEST_TRML_CD AND a.LH_DSPTCH_DT = b.LH_DSPTCH_DT AND a.TRLR_NBR < b.TRLR_NBR JOIN lane_ref r ON r.ORIG_TRML_CD = a.ORIG_TRML_CD AND r.DEST_TRML_CD = a.DEST_TRML_CD WHERE a.LD_CUBE_FT + b.LD_CUBE_FT <= 2000 AND a.LD_WGT_LB + b.LD_WGT_LB <= 20000 AND a.SHPMT_CNT > 1 AND b.SHPMT_CNT > 1  -- plus the Priority screen via SHPMT_NBR_LST/shpmt_mstr join; state which pairs it removes"
@@ -300,6 +305,7 @@ ontology = {
                 "min_imbalance": 2
             },
             "impact_formula": "empty_miles_avoided_usd ~= imbalance * LANE_MILES * CPM_USD (repositioning cost proxy)",
+            "granularity": "lane pair, refined to day-of-week when samples permit",
             "owner": "Linehaul network planning",
             "provenance": {"policy": "Network Balance Guidelines", "effective": "demo placeholder"}
         },
@@ -317,6 +323,7 @@ ontology = {
                 "min_load_count": 4,
                 "min_observed_weeks": 3
             },
+            "granularity": "lane + day-of-week preferred (trim the weak departure, keep the rest); whole-lane only when low fill is uniform",
             "impact_formula": "weekly_saving_usd = LANE_MILES * CPM_USD per schedule removed",
             "owner": "Linehaul network planning",
             "provenance": {"policy": "Network Frequency Guidelines", "effective": "demo placeholder"}
@@ -337,7 +344,8 @@ ontology = {
                 "4. Quantify the counterfactual: recompute average UTIL_PCT_3 with eligible merges executed — 'current X% -> achievable Y%'. Label it a PLANNING ESTIMATE: departure windows, door capacity, and driver hours are not modeled (departure timestamps are a production data need).",
                 "5. DECOMPOSE DIRECTIONALLY: for each lane pair, compare both directions' load counts. Driver positions = MAX direction; the gap = repositioning exposure. A structurally light backhaul is NOT a consolidation problem — apply backhaul_rebalance (rerouting/triangulation) and backhaul-specific targets instead.",
                 "6. Persistent low-fill high-frequency lanes -> frequency_rationalization, floored at 3 schedules/week for service.",
-                "7. When tradeoffs become network-wide (schedule redesign, terminal balance), escalate to formal optimization (MILP) — same rules become its constraints."
+                "7. MATCH GRANULARITY TO EVIDENCE: before recommending, check whether the pattern is day-of-week specific (e.g., low fill or imbalance concentrated on particular days). If DOW samples meet min_dow_load_count, scope the action to those days (trim one departure; reroute on concentrated days). Otherwise state that evidence supports lane-level review only.",
+                "8. When tradeoffs become network-wide (schedule redesign, terminal balance), escalate to formal optimization (MILP) — same rules become its constraints."
             ],
             "owner": "Linehaul load planning (moves) / Network planning (frequency) / Pricing (density mix)"
         }

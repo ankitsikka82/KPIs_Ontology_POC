@@ -753,12 +753,33 @@ def find_frequency_candidates():
                  & (lanes['loads'] >= FP["min_load_count"])
                  & (lanes['observed_weeks'] >= FP["min_observed_weeks"])].copy()
     cand = cand[cand['SCHED_PER_WK'] - 1 >= FP["min_frequency_floor"]]
+    # DOW evidence (governed): name specific weak days only when that day's
+    # sample clears min_dow_load_count; otherwise evidence is lane-grain only
+    GN = ontology["business_rules"]["recommendation_granularity"]["parameters"]
+    uw2 = utilization.copy()
+    uw2['LH_DSPTCH_DT'] = pd.to_datetime(uw2['LH_DSPTCH_DT'])
+    uw2['dow'] = uw2['LH_DSPTCH_DT'].dt.day_name()
+    def _dow_evidence(row):
+        g = uw2[(uw2['ORIG_TRML_CD'] == row['ORIG_TRML_CD'])
+                & (uw2['DEST_TRML_CD'] == row['DEST_TRML_CD'])]
+        prof = g.groupby('dow').agg(n=('TRLR_NBR', 'count'),
+                                    fill=('UTIL_PCT_3', 'mean'))
+        weak = prof[(prof['n'] >= GN["min_dow_load_count"])
+                    & (prof['fill'] < FP["max_avg_util_pct"])]
+        if len(weak):
+            return "; ".join(f"{d} ({int(r['n'])} loads @ {r['fill']:.0f}%)"
+                             for d, r in weak.iterrows())
+        return "insufficient DOW samples — lane-grain evidence only"
+    if len(cand):
+        cand['dow_evidence'] = cand.apply(_dow_evidence, axis=1)
+    else:
+        cand['dow_evidence'] = pd.Series(dtype=str)
     cand['lane'] = cand.apply(lambda r: f"{TERMINAL_NAMES[r['ORIG_TRML_CD']]} → "
                                         f"{TERMINAL_NAMES[r['DEST_TRML_CD']]}", axis=1)
     cand['avg_util'] = cand['avg_util'].round(1)
     cand['weekly_saving_usd'] = (cand['LANE_MILES'] * cand['CPM_USD']).round(0)
     return cand[['lane', 'avg_util', 'loads', 'observed_weeks', 'SCHED_PER_WK',
-                 'SVC_STD_DAYS', 'weekly_saving_usd']]
+                 'SVC_STD_DAYS', 'weekly_saving_usd', 'dow_evidence']]
 
 # ===============================================================
 # CHAT SESSION: Claude is stateless — the orchestration layer (this
@@ -1223,7 +1244,22 @@ def lane_imbalance(orig=None):
             continue
         seen.add(key)
         f, r = fmap.get((key[0], key[1]), 0), fmap.get((key[1], key[0]), 0)
+        GN = ontology["business_rules"]["recommendation_granularity"]["parameters"]
+        _ud = utilization.copy()
+        _ud['LH_DSPTCH_DT'] = pd.to_datetime(_ud['LH_DSPTCH_DT'])
+        _ud['dow'] = _ud['LH_DSPTCH_DT'].dt.day_name()
+        _pair_loads = _ud[((_ud['ORIG_TRML_CD'] == key[0]) & (_ud['DEST_TRML_CD'] == key[1]))
+                          | ((_ud['ORIG_TRML_CD'] == key[1]) & (_ud['DEST_TRML_CD'] == key[0]))]
+        _dprof = []
+        for _d, _g in _pair_loads.groupby('dow'):
+            if len(_g) >= GN["min_dow_load_count"]:
+                _f2 = int((_g['ORIG_TRML_CD'] == key[0]).sum())
+                _r2 = len(_g) - _f2
+                if abs(_f2 - _r2) >= 2:
+                    _dprof.append(f"{_d} ({_f2}v{_r2})")
         rows.append({
+            'dow_concentration': "; ".join(_dprof) if _dprof
+                                 else "insufficient DOW samples — pair-grain only",
             'lane_pair': f"{TERMINAL_NAMES[key[0]]} ↔ {TERMINAL_NAMES[key[1]]}",
             f'{key[0]}→{key[1]}': f, f'{key[1]}→{key[0]}': r,
             'fwd': f, 'rev': r, 'a': key[0], 'b': key[1],
@@ -1234,7 +1270,8 @@ def lane_imbalance(orig=None):
     if orig:
         df = df[(df['a'] == orig) | (df['b'] == orig)]
     return df[['lane_pair', 'fwd', 'rev', 'directional_load_requirement',
-               'directional_load_gap (potential repositioning exposure)']].rename(
+               'directional_load_gap (potential repositioning exposure)',
+               'dow_concentration']].rename(
         columns={'fwd': 'direction A→B loads', 'rev': 'direction B→A loads'})
 
 
@@ -2047,6 +2084,13 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
                        f"Linehaul load planning.")
             if len(_sdg['moves']):
                 st.dataframe(_sdg['moves'], hide_index=True, use_container_width=True)
+            _fr = find_frequency_candidates()
+            if _scope_code:
+                _fr = _fr[_fr['lane'].str.startswith(TERMINAL_NAMES[_scope_code])]
+            if len(_fr):
+                st.markdown("**Preliminary schedule-review signals** — scoped to the "
+                            "day-of-week grain where samples permit:")
+                st.dataframe(_fr, hide_index=True, use_container_width=True)
             _imb = lane_imbalance(orig=_scope_code)
             if len(_imb):
                 st.markdown("**Directional balance** — the load requirement follows "
