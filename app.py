@@ -13,7 +13,7 @@ from pyvis.network import Network
 st.set_page_config(page_title="Cube Utilization POC", layout="wide")
 
 st.title("Cube Utilization Semantic Ontology POC")
-st.markdown("Demonstrating the value of a semantic context layer in conversational analytics")
+st.markdown("How governed semantics powers trusted analytics, proactive intelligence, and operational decision support")
 
 
 @st.cache_data
@@ -52,6 +52,9 @@ if not api_key:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
 st.sidebar.header("Configuration")
+MODEL_OPTIONS = ["claude-sonnet-4-6", "claude-opus-4-8", "claude-fable-5"]
+MODEL_ID = st.sidebar.selectbox("Model (both sides always use the same one)",
+                                MODEL_OPTIONS, index=0)
 if not api_key:
     api_key = st.session_state.get("shared_api_key", "")
 if not api_key:
@@ -253,86 +256,6 @@ PROD_FLOW_SVG = """
 # DELEGATED COMPUTATION: SQL extraction, validation gate, execution
 # The LLM interprets and writes the query; DuckDB computes.
 # ===============================================================
-FORBIDDEN_SQL = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-                 "ATTACH", "COPY", "PRAGMA", "INSTALL", "LOAD"]
-
-
-def extract_sql(response_text):
-    """Pull the SQL out of a ```sql fenced block; fall back to first SELECT/WITH."""
-    m = re.search(r"```sql\s*(.*?)```", response_text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"```\s*((?:SELECT|WITH).*?)```", response_text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"\b(SELECT|WITH)\b.*", response_text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(0).strip()
-    return None
-
-
-ALLOWED_TABLES = {"shpmt_mstr", "lh_dsptch", "trlr_util_fct", "pln_mvmt", "lane_ref"}
-
-
-def validate_sql(sql):
-    """POC governance gate: read-only, single statement, no DDL/DML, comment
-    stripping, and a table ALLOWLIST. Honest scope: production adds SQL AST
-    validation (e.g., sqlglot), column allowlists, Unity Catalog entitlements,
-    row/column security, cost limits, and audit logging."""
-    if not sql:
-        return False, "No SQL query found in the response."
-    body = sql.strip().rstrip(";").strip()
-    if ";" in body:
-        return False, "Multiple statements are not allowed."
-    first_word = body.split(None, 1)[0].upper() if body.split() else ""
-    if first_word not in ("SELECT", "WITH"):
-        return False, f"Only SELECT queries are allowed (got '{first_word}')."
-    scrub = re.sub(r"'[^']*'", "''", body)
-    scrub = re.sub(r"--[^\n]*", " ", scrub)
-    scrub = re.sub(r"/\*.*?\*/", " ", scrub, flags=re.DOTALL)
-    upper = scrub.upper()
-    for kw in FORBIDDEN_SQL:
-        if re.search(r"\b" + kw + r"\b", upper):
-            return False, f"Forbidden keyword: {kw}."
-    ctes = set(m.lower() for m in re.findall(r"(?i)(?:WITH|,)\s*([a-zA-Z_][\w]*)\s+AS\s*\(", scrub))
-    refs = set(m.lower() for m in re.findall(r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", scrub))
-    unknown = refs - ALLOWED_TABLES - ctes
-    if unknown:
-        return False, f"Table(s) not on the allowlist: {', '.join(sorted(unknown))}."
-    return True, body
-
-
-def run_sql(sql):
-    """Execute against the four registered tables; return (df, error)."""
-    try:
-        con = duckdb.connect()
-        con.register("shpmt_mstr", duck_shipments)
-        con.register("lh_dsptch", duck_dispatches)
-        con.register("trlr_util_fct", duck_utilization)
-        con.register("pln_mvmt", duck_movements)
-        con.register("lane_ref", lane_ref)
-        df = con.execute(sql).df()
-        # round floats for readable, checkable output
-        for c in df.select_dtypes(include="float").columns:
-            df[c] = df[c].round(2)
-        return df, None
-    except Exception as e:
-        return None, str(e)
-
-
-def schema_description():
-    """Schemas + 3 sample rows per table. This is ALL the model sees of the
-    data in production mode — never the full rows."""
-    parts = []
-    for name, df in [("shpmt_mstr", duck_shipments), ("lh_dsptch", duck_dispatches),
-                     ("trlr_util_fct", duck_utilization),
-                     ("pln_mvmt", duck_movements), ("lane_ref", lane_ref)]:
-        cols = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns)
-        parts.append(f"TABLE {name}\n  columns: {cols}\n  sample rows:\n"
-                     f"{df.head(3).to_string(index=False)}")
-    return "\n\n".join(parts)
-
-
 # ===============================================================
 # ARCHITECTURE DIAGRAM (top of page, expandable)
 # ===============================================================
@@ -733,6 +656,21 @@ def assemble_semantic_slices(user_query, k=6):
     """The RAG step: core invariants + retrieved tail for THIS question."""
     search, engine = get_retriever()
     hits = search(user_query, k=k)
+    # GRAPH EXPANSION: similarity finds the entry point; explicit references
+    # pull mandatory dependencies (pattern -> metric/action -> governing rule)
+    have = {cid for (cid, _kind, _t), _s in hits}
+    all_chunks = {c[0]: c for c in build_ontology_corpus()}
+    def _force(cid):
+        if cid in all_chunks and cid not in have:
+            hits.append((all_chunks[cid], -1.0))  # -1 marks "dependency-included"
+            have.add(cid)
+    for (cid, _kind, _text), _s in list(hits):
+        if cid.startswith("pattern:"):
+            ref = cid.split(":")[-1].replace(" (ACTION)", "")
+            _force(f"metric:{ref}")
+            _force(f"action:{ref}")
+            if ref == "reported_utilization":
+                _force("rule:reported_utilization_exclusion")
     retrieved_text = "\n\n".join(
         f"[{cid}] (score {score:.3f})\n{text}" for (cid, kind, text), score in hits)
     core = {name: ontology["business_rules"][name] for name in CORE_RULES
@@ -774,17 +712,24 @@ def find_consolidations():
             wgt = a['LD_WGT_LB'] + b['LD_WGT_LB']
             lane = lane_ref[(lane_ref['ORIG_TRML_CD'] == o) & (lane_ref['DEST_TRML_CD'] == dd)]
             saving = round(float(lane['LANE_MILES'].iloc[0] * lane['CPM_USD'].iloc[0]), 0) if not lane.empty else 0
+            P = ontology["actions"]["consolidation_opportunity"]["parameters"]
             rec = {'trailer_1': a['TRLR_NBR'], 'trailer_2': b['TRLR_NBR'],
                    'lane': f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}",
                    'date': dt, 'combined_cube': int(cube), 'combined_wgt': int(wgt),
                    'est_saving_usd': saving}
-            if cube > 2000 or wgt > 20000:
+            if cube > P["max_combined_cube"] or wgt > P["max_combined_weight_lb"]:
                 rec['rejected_because'] = 'exceeds pup capacity'
                 rejected.append(rec); continue
-            if a['SHPMT_CNT'] <= 1 or b['SHPMT_CNT'] <= 1:
+            if (P.get("require_different_dispatch")
+                    and a['DSPTCH_NBR'] == b['DSPTCH_NBR']):
+                rec['rejected_because'] = 'same dispatch — pups already share a driver; no move saved'
+                rejected.append(rec); continue
+            if (a['SHPMT_CNT'] < P["min_shipments_per_load"]
+                    or b['SHPMT_CNT'] < P["min_shipments_per_load"]):
                 rec['rejected_because'] = 'service-protection load (never held)'
                 rejected.append(rec); continue
-            if 'Priority' in (_trailer_services(a['TRLR_NBR']) | _trailer_services(b['TRLR_NBR'])):
+            if any(svc in (_trailer_services(a['TRLR_NBR']) | _trailer_services(b['TRLR_NBR']))
+                   for svc in P["excluded_service_types"]):
                 rec['rejected_because'] = 'Priority-hold rule (Priority freight never held)'
                 rejected.append(rec); continue
             eligible.append(rec)
@@ -826,7 +771,13 @@ def utilization_diagnostic(orig=None):
             if not placed:
                 bins.append({'cube': r['LD_CUBE_FT'], 'wgt': r['LD_WGT_LB'],
                              'members': [r['TRLR_NBR']]})
-        saved = len(elig) - len(bins)
+        # a merge only saves a MOVE if the merged pups came from different
+        # dispatches (same-dispatch pups already share a driver)
+        disp_of = dict(zip(grp['TRLR_NBR'], grp['DSPTCH_NBR']))
+        saved = 0
+        for b in bins:
+            if len(b['members']) > 1:
+                saved += len(set(disp_of[t] for t in b['members'])) - 1
         if saved > 0:
             lane = lane_ref[(lane_ref['ORIG_TRML_CD'] == o) & (lane_ref['DEST_TRML_CD'] == dd)]
             usd = round(float(lane['LANE_MILES'].iloc[0] * lane['CPM_USD'].iloc[0]) * saved, 0) if not lane.empty else 0
@@ -855,8 +806,10 @@ def find_frequency_candidates():
     lanes = (utilization.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'], as_index=False)
              .agg(avg_util=('UTIL_PCT_3', 'mean'), loads=('TRLR_NBR', 'count')))
     lanes = lanes.merge(lane_ref, on=['ORIG_TRML_CD', 'DEST_TRML_CD'])
-    cand = lanes[(lanes['avg_util'] < 60) & (lanes['SCHED_PER_WK'] >= 5)].copy()
-    cand = cand[cand['SCHED_PER_WK'] - 1 >= 3]
+    FP = ontology["actions"]["frequency_rationalization"]["parameters"]
+    cand = lanes[(lanes['avg_util'] < FP["max_avg_util_pct"])
+                 & (lanes['SCHED_PER_WK'] >= FP["min_sched_per_wk"])].copy()
+    cand = cand[cand['SCHED_PER_WK'] - 1 >= FP["min_frequency_floor"]]
     cand['lane'] = cand.apply(lambda r: f"{TERMINAL_NAMES[r['ORIG_TRML_CD']]} → "
                                         f"{TERMINAL_NAMES[r['DEST_TRML_CD']]}", axis=1)
     cand['avg_util'] = cand['avg_util'].round(1)
@@ -1228,7 +1181,10 @@ def check_facts(facts, response_text):
 # ===============================================================
 # OPENING VISUALS: what this is, in ninety seconds
 # ===============================================================
-V1_PROBLEM = """
+def build_v1_problem():
+    _naive = utilization['UTIL_PCT_3'].mean()
+    _rep = utilization[utilization['SHPMT_CNT'] > 1]['UTIL_PCT_3'].mean()
+    return """
 <svg viewBox="0 0 940 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
   <text x="470" y="30" text-anchor="middle" font-size="17" font-weight="bold" fill="#212529">The problem in one picture</text>
   <rect x="330" y="50" width="280" height="46" rx="10" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
@@ -1237,15 +1193,15 @@ V1_PROBLEM = """
   <line x1="540" y1="96" x2="710" y2="140" stroke="#555" stroke-width="2" marker-end="url(#v1a)"/>
   <rect x="80" y="142" width="300" height="70" rx="10" fill="#fff" stroke="#d62828" stroke-width="2"/>
   <text x="230" y="168" text-anchor="middle" font-size="13" font-weight="bold" fill="#d62828">AI reads the schema alone</text>
-  <text x="230" y="192" text-anchor="middle" font-size="20" font-weight="bold" fill="#d62828">53.4%</text>
+  <text x="230" y="192" text-anchor="middle" font-size="20" font-weight="bold" fill="#d62828">""" + f"{_naive:.1f}%" + """</text>
   <rect x="560" y="142" width="300" height="70" rx="10" fill="#fff" stroke="#2b8a3e" stroke-width="2"/>
   <text x="710" y="168" text-anchor="middle" font-size="13" font-weight="bold" fill="#2b8a3e">AI + governed company meaning</text>
-  <text x="710" y="192" text-anchor="middle" font-size="20" font-weight="bold" fill="#2b8a3e">65.6%</text>
-  <text x="470" y="248" text-anchor="middle" font-size="14" fill="#495057">Both queries ran successfully. Only one follows company policy.</text>
+  <text x="710" y="192" text-anchor="middle" font-size="20" font-weight="bold" fill="#2b8a3e">""" + f"{_rep:.1f}%" + """</text>
+  <text x="470" y="248" text-anchor="middle" font-size="14" fill="#495057">Both queries ran successfully. Only one follows company policy. (Live numbers from the current data.)</text>
   <text x="470" y="272" text-anchor="middle" font-size="13" font-style="italic" fill="#868e96">The model did not fail at SQL — the enterprise failed to provide the meaning.</text>
   <defs><marker id="v1a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
-</svg>
-"""
+</svg>"""
+
 
 V2_CONTRACT = """
 <svg viewBox="0 0 940 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
@@ -1358,7 +1314,7 @@ does not automatically know which definition, date, code, or policy the company
 considers authoritative. That knowledge lives in memos and people, not schemas. The
 result: two technically valid queries, two different numbers, one business decision.
 """)
-    components.html(V1_PROBLEM, height=340, scrolling=True)
+    components.html(build_v1_problem(), height=340, scrolling=True)
     st.markdown(f"""
 **What is in this app** — four components, top to bottom:
 
@@ -1450,70 +1406,12 @@ with _d2:
 # ===============================================================
 # ACTION PANEL: from measurement to governed action
 # ===============================================================
-with st.expander("🔎 Opportunity Scan — run on demand", expanded=False):
-    st.caption("Nothing here is precomputed furniture: press the button and the "
-               "governed action engines run against the current data — in production, "
-               "against live gold tables, scoped and scheduled. The conversational "
-               "path (the assistant's offer after a relevant question below) invokes "
-               "the same engines.")
-    if st.button("▶ Run opportunity scan", type="primary"):
-        _elig, _rej = find_consolidations()
-        _freq = find_frequency_candidates()
-
-        _a1, _a2 = st.columns(2)
-        with _a1:
-            st.markdown("**Trailer consolidation** · owner: Linehaul load planning")
-            if len(_elig):
-                st.dataframe(_elig, hide_index=True, use_container_width=True)
-                st.success(f"{len(_elig)} eligible pair(s) — est. total saving "
-                           f"${int(_elig['est_saving_usd'].sum()):,} (one avoided pup move each)")
-            else:
-                st.info("No eligible pairs this period.")
-            if len(_rej):
-                with st.expander(f"Screened out by rule ({len(_rej)})"):
-                    st.dataframe(_rej, hide_index=True, use_container_width=True)
-                    st.caption("Physically feasible pairs rejected by INSTITUTIONAL rules — the "
-                               "Priority-hold screen requires the shipment-level join; it is "
-                               "invisible in the utilization fact alone.")
-        with _a2:
-            st.markdown("**Schedule frequency review** · owner: Linehaul network planning")
-            if len(_freq):
-                st.dataframe(_freq, hide_index=True, use_container_width=True)
-                st.success("Candidate(s) below 60% fill at ≥5 schedules/week. Weekly saving per "
-                           "schedule removed; minimum-frequency floor of 3 protects the service "
-                           "standard (SVC_STD_DAYS).")
-            else:
-                st.info("No frequency candidates this period.")
-        st.markdown("---")
-        st.markdown("**Utilization Improvement Diagnostic** — root cause, then the move")
-        _dg = utilization_diagnostic()
-        _d1, _d2, _d3, _d4 = st.columns(4)
-        _d1.metric("Current avg utilization", f"{_dg['current']}%")
-        _d2.metric("Achievable (planning estimate)", f"{_dg['achievable']}%",
-                   delta=f"+{_dg['uplift']} pts")
-        _d3.metric("Moves saved", int(_dg['moves']['moves_saved'].sum()) if len(_dg['moves']) else 0)
-        _d4.metric("Est. saving", f"${_dg['total_usd']:,}")
-        st.caption(f"Root cause FIRST: of {_dg['total_n']} loads, {_dg['weighed_out_n']} are "
-                   f"WEIGHED-OUT (full at ~{_dg['weighed_out_avg_cube']}% cube — freight "
-                   f"density, a pricing/mix lever, NOT a planning failure) and "
-                   f"{_dg['service_prot_n']} are service-protection (policy). The addressable "
-                   f"gap is same-lane same-day loads that legally combine. The achievable "
-                   f"figure is a greedy re-pack PLANNING ESTIMATE — departure windows, door "
-                   f"capacity, and driver hours are unmodeled (departure timestamps: production "
-                   f"data need). Network-wide tradeoffs escalate to formal optimization (MILP).")
-        if len(_dg['moves']):
-            st.dataframe(_dg['moves'], hide_index=True, use_container_width=True)
-            st.success("Each merged pair frees a DISPATCH — driver + tractor + lane miles — "
-                       "not just a trailer. Owner: Linehaul load planning.")
-
-        st.caption("Roadmap levers (named, not yet implemented): PLAN-VS-ACTUAL ROUTING "
-                   "VARIANCE — compare planned legs (pln_mvmt) against actual routes taken, "
-                   "score each human override's outcome (better/worse cube), and learn from "
-                   "good deviations; requires actual leg events + an override flag. Also: "
-                   "head-haul/backhaul balancing, "
-                   "break-terminal vs direct routing, doubles pairing optimization — each is "
-                   "eligibility rules + an impact formula in the same ACTION layer, then a MILP "
-                   "when network-level tradeoffs demand true optimization.")
+st.caption("Actions in this app are CONVERSATIONAL: ask a question below, and when "
+           "relevant the assistant offers the scoped improvement diagnostic — the same "
+           "governed engines production would also run as scheduled scans. Roadmap "
+           "levers: plan-vs-actual routing variance (actual leg events + override flag), "
+           "head-haul/backhaul balancing, doubles pairing, then MILP when tradeoffs go "
+           "network-wide.")
 
 st.header("Ask About Cube Utilization")
 _h1, _h2 = st.columns([4, 1])
@@ -1531,7 +1429,7 @@ with _h1:
 with _h2:
     if st.button("🔄 New chat", use_container_width=True):
         for k in ["chat_turns", "selected_query", "last_user_query", "custom_q",
-                  "rag_hits", "rag_engine", "is_preset"]:
+                  "rag_hits", "rag_engine", "is_preset", "exec_cache", "force_run"]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -1550,6 +1448,7 @@ for row_start in range(0, len(_qs), 4):
             if st.button(q, key=f"preset_{row_start + j}", use_container_width=True):
                 st.session_state.selected_query = q
                 st.session_state.is_preset = True
+                st.session_state.force_run = True
 
 _c1, _c2 = st.columns([5, 1])
 with _c1:
@@ -1559,10 +1458,9 @@ with _c2:
     if st.button("Ask", use_container_width=True, type="primary") and custom.strip():
         st.session_state.selected_query = custom.strip()
         st.session_state.is_preset = custom.strip() in PRESET_QUESTIONS
+        st.session_state.force_run = True
 
 user_query = st.session_state.selected_query
-# run-once: consume the trigger so reruns (including New chat) never re-execute
-st.session_state.selected_query = ""
 
 if user_query:
     st.info(f"Question: {user_query}")
@@ -1606,9 +1504,6 @@ execute it — do not fabricate result numbers.
 
 You additionally have access to a governed semantic ontology, provided as ALWAYS-ON
 core rules plus definitions RETRIEVED for this specific question. Follow them EXACTLY.
-When a rule says EXCLUDE, implement it as a WHERE filter on the aggregation itself —
-reporting an excluded-count column while averaging over all rows is NOT compliance.
-When a retrieved metric provides sql_equivalent, adapt that SQL precisely.
 
 BEGIN your response with ONE compact line in EXACTLY this format, then a blank
 line, then your explanation and query (the system parses and removes it):
@@ -1616,10 +1511,10 @@ TRACE: metric=<one of: trailer_utilization, lane_utilization, volume_by_origin, 
 
 {core_text}
 
-RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology index):
-{retrieved_text}
+{SCHEMAS}
 
-{SCHEMAS}"""
+RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology index):
+{retrieved_text}"""
 
     # PRODUCTION CACHING: the stable context (schemas, and for the semantic
     # side the ontology) goes in the SYSTEM parameter with cache_control.
@@ -1627,8 +1522,16 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
     # ~10% of the fresh-token price. Only the user's question changes per call.
     raw_system = [{"type": "text", "text": raw_context,
                    "cache_control": {"type": "ephemeral"}}]
-    semantic_system = [{"type": "text", "text": semantic_context,
-                        "cache_control": {"type": "ephemeral"}}]
+    # CACHE-CORRECT SPLIT: the stable prefix (instructions + core + schemas) is
+    # cached; the per-question retrieved slices ride uncached after it, so the
+    # cache key never changes between questions.
+    _stable_prefix, _sep, _variable_tail = semantic_context.partition(
+        "RETRIEVED SEMANTIC CONTEXT")
+    semantic_system = [
+        {"type": "text", "text": _stable_prefix,
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": _sep + _variable_tail},
+    ]
 
     st.session_state.last_user_query = user_query
     # Store both prompts so the developer section can show the real payloads
@@ -1682,7 +1585,8 @@ the one part of the stack that better models can never replace.
                    "step is what keeps the prompt small — production swaps this in-memory "
                    "index for Databricks Vector Search.")
         for (cid, kind, text), score in st.session_state.get("rag_hits", []):
-            st.markdown(f"**`{cid}`** · similarity {score:.3f}")
+            st.markdown(f"**`{cid}`** · " + ("dependency-included"
+                        if score < 0 else f"similarity {score:.3f}"))
             st.caption(text[:300] + ("…" if len(text) > 300 else ""))
 
     col1, col2 = st.columns(2)
@@ -1719,11 +1623,12 @@ the one part of the stack that better models can never replace.
                                                   + "\n" + result.to_string(index=False))
             cache_w = getattr(usage, "cache_creation_input_tokens", 0) or 0
             cache_r = getattr(usage, "cache_read_input_tokens", 0) or 0
-            st.caption(f"⏱ {elapsed:.1f}s · tokens: {usage.input_tokens:,} fresh in, "
+            st.caption(f"⏱ {elapsed:.1f}s · {MODEL_ID} · tokens: {usage.input_tokens:,} fresh in, "
                        f"{cache_w:,} cache-write, {cache_r:,} cache-read (~10% price) / "
                        f"{usage.output_tokens:,} out (budget: 1,200 — same both sides"
                        f"{extra_note}). First question warms the cache; "
-                       f"repeat questions read it.")
+                       f"repeat questions reuse the identical stable prefix; retrieved "
+                       f"slices are processed fresh each question.")
 
     with col1:
         st.subheader("Without Semantic Ontology")
@@ -1731,12 +1636,30 @@ the one part of the stack that better models can never replace.
         with st.spinner("Generating query..."):
             try:
                 t0 = time.time()
-                response_raw = client.messages.create(
-                    model="claude-sonnet-4-5",
-                    max_tokens=1200,
-                    system=raw_system,
-                    messages=build_messages("raw", user_query)
-                )
+                _fresh = (st.session_state.pop("force_run", False)
+                          or st.session_state.get("exec_cache", {}).get("q") != user_query
+                          or st.session_state.get("exec_cache", {}).get("model") != MODEL_ID)
+                if _fresh:
+                    response_raw = client.messages.create(
+                        model=MODEL_ID,
+                        max_tokens=1200,
+                        system=raw_system,
+                        messages=build_messages("raw", user_query)
+                    )
+                    import types as _t
+                    _u = response_raw.usage
+                    st.session_state.exec_cache = {"q": user_query, "model": MODEL_ID,
+                        "raw_text": response_raw.content[0].text,
+                        "raw_usage": {"input_tokens": _u.input_tokens,
+                                      "output_tokens": _u.output_tokens,
+                                      "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
+                                      "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}}
+                import types as _t2
+                _c = st.session_state.exec_cache
+                class _RawResp: pass
+                response_raw = _RawResp()
+                response_raw.content = [_t2.SimpleNamespace(text=_c["raw_text"])]
+                response_raw.usage = _t2.SimpleNamespace(**_c["raw_usage"])
                 _render_side(st.container(), response_raw.content[0].text,
                              time.time() - t0, response_raw.usage, "raw_out")
             except Exception as e:
@@ -1749,19 +1672,34 @@ the one part of the stack that better models can never replace.
         with st.spinner("Generating query..."):
             try:
                 t0 = time.time()
-                response_semantic = client.messages.create(
-                    model="claude-sonnet-4-5",
-                    max_tokens=1200,
-                    system=semantic_system,
-                    messages=build_messages("sem", user_query)
-                )
+                if _fresh:
+                    response_semantic = client.messages.create(
+                        model=MODEL_ID,
+                        max_tokens=1200,
+                        system=semantic_system,
+                        messages=build_messages("sem", user_query)
+                    )
+                    _u2 = response_semantic.usage
+                    st.session_state.exec_cache.update({
+                        "sem_text": response_semantic.content[0].text,
+                        "sem_usage": {"input_tokens": _u2.input_tokens,
+                                      "output_tokens": _u2.output_tokens,
+                                      "cache_creation_input_tokens": getattr(_u2, "cache_creation_input_tokens", 0) or 0,
+                                      "cache_read_input_tokens": getattr(_u2, "cache_read_input_tokens", 0) or 0}})
+                import types as _t3
+                _c2 = st.session_state.exec_cache
+                class _SemResp: pass
+                response_semantic = _SemResp()
+                response_semantic.content = [_t3.SimpleNamespace(text=_c2["sem_text"])]
+                response_semantic.usage = _t3.SimpleNamespace(**_c2["sem_usage"])
                 sem_elapsed = time.time() - t0
                 response_text = response_semantic.content[0].text
-                st.session_state.setdefault("chat_turns", []).append({
-                    "q": user_query,
-                    "raw": _turn_summary(response_raw.content[0].text),
-                    "sem": _turn_summary(response_text),
-                })
+                if _fresh:
+                    st.session_state.setdefault("chat_turns", []).append({
+                        "q": user_query,
+                        "raw": _turn_summary(response_raw.content[0].text),
+                        "sem": _turn_summary(response_text),
+                    })
 
                 used_entities, used_rels, used_metric = [], [], None
                 answer_lines = []
@@ -1802,7 +1740,11 @@ the one part of the stack that better models can never replace.
                     "pln_mvmt": ["Shipment", "Terminal"],
                     "lane_ref": ["Lane"],
                 }
-                sql_tables = st.session_state.get("sem_out_tables", [])
+                _cur_sql = extract_sql(answer_text) or ""
+                sql_tables = sorted(set(
+                    m2.lower() for m2 in re.findall(
+                        r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", _cur_sql))
+                    & ALLOWED_TABLES)
                 derived = []
                 for t in sql_tables:
                     for e in TABLE_ENTITIES.get(t, []):
@@ -1932,13 +1874,20 @@ the one part of the stack that better models can never replace.
 _lq = st.session_state.get("last_user_query", "")
 if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trailer"]):
     _NAME_TO_CODE = {v.lower(): k for k, v in TERMINAL_NAMES.items()}
-    _scope_code = None
     _turns = st.session_state.get("chat_turns", [])
     _scan = _lq.lower() + " " + (_turns[-1]["sem"].lower() if _turns else "")
+    _matches = []
     for _nm, _cd in _NAME_TO_CODE.items():
         if _nm in _scan or f" {_cd.lower()} " in f" {_scan} " or f"({_cd.lower()})" in _scan:
-            _scope_code = _cd
-            break
+            _matches.append(_cd)
+    if len(_matches) > 1:
+        _choice = st.radio("Multiple terminals mentioned — scope the analysis to:",
+                           [TERMINAL_NAMES[c] for c in _matches] + ["Network-wide"],
+                           horizontal=True, key="scope_choice")
+        _scope_code = (None if _choice == "Network-wide"
+                       else {v: k for k, v in TERMINAL_NAMES.items()}[_choice])
+    else:
+        _scope_code = _matches[0] if _matches else None
     _scope_label = f" for {TERMINAL_NAMES[_scope_code]}-origin lanes" if _scope_code else " (network-wide)"
     st.markdown("---")
     st.markdown(f"💬 **Assistant:** Want me to check for improvement "
@@ -2143,7 +2092,7 @@ prompt = (
     + SCHEMAS_ONLY  # column names + dtypes + 3 sample rows; never full data
 )
 response = client.messages.create(
-    model="claude-sonnet-4-5", max_tokens=1200,
+    model=MODEL_ID, max_tokens=1200,
     messages=[{"role": "user", "content": prompt + "\\n\\nQuestion: " + user_query}]
 )
 sql = extract_sql(response.content[0].text)

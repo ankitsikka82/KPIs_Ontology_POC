@@ -263,10 +263,20 @@ ontology = {
             "description": "Combine two same-lane, same-day trailer loads into one trailer, saving one linehaul move.",
             "eligibility": [
                 "Same directed lane (ORIG_TRML_CD, DEST_TRML_CD) and same LH_DSPTCH_DT",
+                "DIFFERENT DSPTCH_NBR — two pups already moving on the same dispatch share a driver; merging them saves no linehaul move",
                 "Combined LD_CUBE_FT <= 2000 AND combined LD_WGT_LB <= 20000",
                 "Both loads have SHPMT_CNT > 1 (service-protection loads are dispatched for service, never held for consolidation)",
                 "PRIORITY-HOLD RULE: neither trailer may carry any Priority shipment (SVC_TYP_CD = 'Priority' via SHPMT_NBR_LST join to shpmt_mstr). Priority freight is never held or re-handled for consolidation. This is invisible in trlr_util_fct — it requires the shipment-level join."
             ],
+            "parameters": {
+                "max_combined_cube": 2000,
+                "max_combined_weight_lb": 20000,
+                "min_shipments_per_load": 2,
+                "excluded_service_types": ["Priority"],
+                "require_different_dispatch": True,
+                "same_lane_required": True,
+                "same_operating_day_required": True
+            },
             "impact_formula": "est_saving_usd = LANE_MILES * CPM_USD from lane_ref (one avoided pup move)",
             "owner": "Linehaul load planning",
             "provenance": {"policy": "Linehaul Consolidation Guidelines", "effective": "demo placeholder"},
@@ -279,6 +289,11 @@ ontology = {
                 "SCHED_PER_WK >= 5 currently",
                 "MINIMUM-FREQUENCY FLOOR: never below 3 schedules/week — protects the lane's SVC_STD_DAYS service standard. Utilization is optimized SUBJECT TO service, never at its expense."
             ],
+            "parameters": {
+                "max_avg_util_pct": 60,
+                "min_sched_per_wk": 5,
+                "min_frequency_floor": 3
+            },
             "impact_formula": "weekly_saving_usd = LANE_MILES * CPM_USD per schedule removed",
             "owner": "Linehaul network planning",
             "provenance": {"policy": "Network Frequency Guidelines", "effective": "demo placeholder"}
