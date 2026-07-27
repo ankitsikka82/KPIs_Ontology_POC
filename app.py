@@ -1488,43 +1488,6 @@ knowledge graph, and the validation gate's honest scope.
 # ===============================================================
 # KPI DASHBOARD: the ANTICIPATED questions (traditional BI world)
 # ===============================================================
-with st.expander("📊 Network KPI snapshot & dashboard", expanded=not _has_convo):
-    st.header("KPI Dashboard — the anticipated questions")
-    st.caption("This is the world that already exists: curated gold metrics on a dashboard, "
-               "answering the questions someone anticipated at build time. The conversational "
-               "section below serves the UNANTICIPATED tail — cuts and combinations nobody "
-               "pre-built — with the ontology supplying the meaning at query time. This mirrors "
-               "embedding a chat assistant inside an existing KPI dashboard application.")
-
-    _inc = utilization[utilization['SHPMT_CNT'] > 1]
-    _kc1, _kc2, _kc3, _kc4 = st.columns(4)
-    _kc1.metric("Reported utilization", f"{_inc['UTIL_PCT_3'].mean():.1f}%",
-                help="Per the 2019 Finance policy: service-protection loads excluded")
-    _kc2.metric("Operational utilization (all loads)", f"{utilization['UTIL_PCT_3'].mean():.1f}%")
-    _kc3.metric("Loads dispatched", f"{len(utilization)}")
-    _kc4.metric("Service-protection loads", f"{(utilization['SHPMT_CNT'] == 1).sum()}")
-
-    _d1, _d2 = st.columns(2)
-    with _d1:
-        st.markdown("**Weekly reported utilization**")
-        _u = _inc.copy()
-        _u['LH_DSPTCH_DT'] = pd.to_datetime(_u['LH_DSPTCH_DT'])
-        _u['week'] = (_u['LH_DSPTCH_DT']
-                      - pd.to_timedelta(_u['LH_DSPTCH_DT'].dt.dayofweek, unit='D')).dt.date
-        _wk = _u.groupby('week')['UTIL_PCT_3'].mean().round(2)
-        st.line_chart(_wk)
-    with _d2:
-        st.markdown("**Worst lanes (reported)**")
-        _ln = (_inc.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])['UTIL_PCT_3']
-               .mean().round(2).sort_values().head(5))
-        _ln.index = [f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}" for o, dd in _ln.index]
-        st.bar_chart(_ln)
-
-
-    # ===============================================================
-    # ACTION PANEL: from measurement to governed action
-    # ===============================================================
-
 st.caption("Actions in this app are CONVERSATIONAL: ask a question below, and when "
            "relevant the assistant offers the scoped improvement diagnostic — the same "
            "governed engines production would also run as scheduled scans. Roadmap "
@@ -1845,6 +1808,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
             with st.spinner("Generating query..."):
                 try:
                     t0 = time.time()
+                    import types as _t2
                     _c = st.session_state.get("exec_cache", {})
                     if "raw_text" not in _c:
                         raise RuntimeError("No cached response — re-ask the question.")
@@ -1865,6 +1829,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
             with st.spinner("Generating query..."):
                 try:
                     t0 = time.time()
+                    import types as _t3
                     _c2 = st.session_state.get("exec_cache", {})
                     if "sem_text" not in _c2:
                         raise RuntimeError("No cached semantic response — the raw side "
@@ -2265,6 +2230,42 @@ if _chatq and _chatq.strip():
 # TECHNICAL APPENDIX: architecture + the live semantic model
 # ===============================================================
 st.header("Technical Appendix")
+with st.expander("📊 Network KPI snapshot & dashboard", expanded=False):
+    st.header("KPI Dashboard — the anticipated questions")
+    st.caption("This is the world that already exists: curated gold metrics on a dashboard, "
+               "answering the questions someone anticipated at build time. The conversational "
+               "section below serves the UNANTICIPATED tail — cuts and combinations nobody "
+               "pre-built — with the ontology supplying the meaning at query time. This mirrors "
+               "embedding a chat assistant inside an existing KPI dashboard application.")
+
+    _inc = utilization[utilization['SHPMT_CNT'] > 1]
+    _kc1, _kc2, _kc3, _kc4 = st.columns(4)
+    _kc1.metric("Reported utilization", f"{_inc['UTIL_PCT_3'].mean():.1f}%",
+                help="Per the 2019 Finance policy: service-protection loads excluded")
+    _kc2.metric("Operational utilization (all loads)", f"{utilization['UTIL_PCT_3'].mean():.1f}%")
+    _kc3.metric("Loads dispatched", f"{len(utilization)}")
+    _kc4.metric("Service-protection loads", f"{(utilization['SHPMT_CNT'] == 1).sum()}")
+
+    _d1, _d2 = st.columns(2)
+    with _d1:
+        st.markdown("**Weekly reported utilization**")
+        _u = _inc.copy()
+        _u['LH_DSPTCH_DT'] = pd.to_datetime(_u['LH_DSPTCH_DT'])
+        _u['week'] = (_u['LH_DSPTCH_DT']
+                      - pd.to_timedelta(_u['LH_DSPTCH_DT'].dt.dayofweek, unit='D')).dt.date
+        _wk = _u.groupby('week')['UTIL_PCT_3'].mean().round(2)
+        st.line_chart(_wk)
+    with _d2:
+        st.markdown("**Worst lanes (reported)**")
+        _ln = (_inc.groupby(['ORIG_TRML_CD', 'DEST_TRML_CD'])['UTIL_PCT_3']
+               .mean().round(2).sort_values().head(5))
+        _ln.index = [f"{TERMINAL_NAMES[o]} → {TERMINAL_NAMES[dd]}" for o, dd in _ln.index]
+        st.bar_chart(_ln)
+
+
+    # ===============================================================
+    # ACTION PANEL: from measurement to governed action
+    # ===============================================================
 st.caption("The proof lives above; the plumbing lives here.")
 
 
