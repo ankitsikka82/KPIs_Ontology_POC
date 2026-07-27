@@ -1,4 +1,3 @@
-
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -1157,6 +1156,61 @@ def check_facts(facts, response_text):
 # ===============================================================
 # OPENING VISUALS: what this is, in ninety seconds
 # ===============================================================
+
+FLOW_COMPARISON_SVG = """
+<svg viewBox="0 0 940 620" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="26" text-anchor="middle" font-size="16" font-weight="bold" fill="#212529">How the two paths work — same question, same model, different context</text>
+  <rect x="280" y="40" width="380" height="40" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="470" y="65" text-anchor="middle" font-size="13" font-weight="bold">User asks: "What's the cube utilization for Atlanta?"</text>
+  <line x1="380" y1="80" x2="235" y2="108" stroke="#555" stroke-width="2" marker-end="url(#fca)"/>
+  <line x1="560" y1="80" x2="705" y2="108" stroke="#555" stroke-width="2" marker-end="url(#fca)"/>
+
+  <text x="235" y="128" text-anchor="middle" font-size="13" font-weight="bold" fill="#c92a2a">WITHOUT governed semantics</text>
+  <rect x="60" y="140" width="350" height="78" rx="9" fill="#fff5f5" stroke="#c92a2a" stroke-width="1.5"/>
+  <text x="235" y="162" text-anchor="middle" font-size="12" font-weight="bold" fill="#212529">1. Model sees the raw schema only</text>
+  <text x="235" y="180" text-anchor="middle" font-size="11" fill="#495057">Cryptic reality: UTIL_PCT_1 / _2 / _3, terminal code ATL,</text>
+  <text x="235" y="196" text-anchor="middle" font-size="11" fill="#495057">packed lists, no definitions — plus 3 sample rows</text>
+  <line x1="235" y1="218" x2="235" y2="238" stroke="#c92a2a" stroke-width="2" marker-end="url(#fca)"/>
+  <rect x="60" y="240" width="350" height="72" rx="9" fill="#fff5f5" stroke="#c92a2a" stroke-width="1.5"/>
+  <text x="235" y="262" text-anchor="middle" font-size="12" font-weight="bold">2. Model GUESSES the meaning</text>
+  <text x="235" y="280" text-anchor="middle" font-size="11" fill="#495057">Which column is authoritative? Which loads count?</text>
+  <text x="235" y="296" text-anchor="middle" font-size="11" fill="#495057">Industry conventions from training — usually right, never governed</text>
+  <line x1="235" y1="312" x2="235" y2="332" stroke="#c92a2a" stroke-width="2" marker-end="url(#fca)"/>
+  <rect x="60" y="334" width="350" height="66" rx="9" fill="#fff5f5" stroke="#c92a2a" stroke-width="1.5"/>
+  <text x="235" y="356" text-anchor="middle" font-size="12" font-weight="bold">3. Writes SQL directly from the guess</text>
+  <text x="235" y="374" text-anchor="middle" font-size="10.5" fill="#495057" font-family="monospace">AVG(UTIL_PCT_?) WHERE ... = 'ATL'  — plausible, unverifiable</text>
+  <line x1="235" y1="400" x2="235" y2="420" stroke="#c92a2a" stroke-width="2" marker-end="url(#fca)"/>
+  <rect x="60" y="422" width="350" height="58" rx="9" fill="#fff" stroke="#c92a2a" stroke-width="2"/>
+  <text x="235" y="444" text-anchor="middle" font-size="12" font-weight="bold" fill="#c92a2a">4. A number — with no policy behind it</text>
+  <text x="235" y="462" text-anchor="middle" font-size="11" fill="#495057">May ignore exclusions, wrong column, wrong date — silently</text>
+
+  <text x="705" y="128" text-anchor="middle" font-size="13" font-weight="bold" fill="#2b8a3e">WITH governed semantics (this app)</text>
+  <rect x="530" y="140" width="350" height="78" rx="9" fill="#ebfbee" stroke="#2b8a3e" stroke-width="1.5"/>
+  <text x="705" y="162" text-anchor="middle" font-size="12" font-weight="bold">1. RETRIEVE the company's meaning (RAG)</text>
+  <text x="705" y="180" text-anchor="middle" font-size="11" fill="#495057">The question searches a governed ontology — business meaning</text>
+  <text x="705" y="196" text-anchor="middle" font-size="11" fill="#495057">stored as data (here: ontology.py; prod: semantic registry)</text>
+  <line x1="705" y1="218" x2="705" y2="238" stroke="#2b8a3e" stroke-width="2" marker-end="url(#fca)"/>
+  <rect x="530" y="240" width="350" height="72" rx="9" fill="#ebfbee" stroke="#2b8a3e" stroke-width="1.5"/>
+  <text x="705" y="260" text-anchor="middle" font-size="12" font-weight="bold">2. Retrieval returns the governed bundle</text>
+  <text x="705" y="278" text-anchor="middle" font-size="11" fill="#495057">Metric: use UTIL_PCT_3 · decode: ATL = Atlanta · Finance</text>
+  <text x="705" y="294" text-anchor="middle" font-size="11" fill="#495057">exclusions · owner + policy provenance · related rules</text>
+  <line x1="705" y1="312" x2="705" y2="332" stroke="#2b8a3e" stroke-width="2" marker-end="url(#fca)"/>
+  <rect x="530" y="334" width="350" height="66" rx="9" fill="#ebfbee" stroke="#2b8a3e" stroke-width="1.5"/>
+  <text x="705" y="354" text-anchor="middle" font-size="12" font-weight="bold">3. Model builds SQL USING that meaning</text>
+  <text x="705" y="370" text-anchor="middle" font-size="10.5" fill="#495057" font-family="monospace">AVG(UTIL_PCT_3) WHERE ORIG_TRML_CD='ATL' + governed filters</text>
+  <text x="705" y="386" text-anchor="middle" font-size="10.5" fill="#495057">(schema + rules ride in a cached context window)</text>
+  <line x1="705" y1="400" x2="705" y2="420" stroke="#2b8a3e" stroke-width="2" marker-end="url(#fca)"/>
+  <rect x="530" y="422" width="350" height="58" rx="9" fill="#fff" stroke="#2b8a3e" stroke-width="2"/>
+  <text x="705" y="442" text-anchor="middle" font-size="12" font-weight="bold" fill="#2b8a3e">4. Gate checks it → database computes →</text>
+  <text x="705" y="460" text-anchor="middle" font-size="11" fill="#495057">answer arrives with definition, policy, owner, and evidence</text>
+
+  <rect x="140" y="504" width="660" height="46" rx="9" fill="#f3f0ff" stroke="#845ef7" stroke-width="1.5"/>
+  <text x="470" y="523" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#3b2b78">Same model. Same question. The ONLY difference is the retrieval step —</text>
+  <text x="470" y="541" text-anchor="middle" font-size="12.5" fill="#3b2b78">governed business meaning, stored as data, delivered to the model at ask-time.</text>
+  <text x="470" y="580" text-anchor="middle" font-size="11" font-style="italic" fill="#868e96">In both paths the database does the arithmetic — the model never calculates. The difference is whether meaning is guessed or governed.</text>
+  <defs><marker id="fca" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
+</svg>"""
+
 def build_v1_problem():
     _naive = utilization['UTIL_PCT_3'].mean()
     _rep = utilization[utilization['SHPMT_CNT'] > 1]['UTIL_PCT_3'].mean()
@@ -1355,6 +1409,8 @@ considers authoritative. That knowledge lives in memos and people, not schemas. 
 result: two technically valid queries, two different numbers, one business decision.
 """)
     components.html(build_v1_problem(), height=340, scrolling=True)
+    components.html(FLOW_COMPARISON_SVG, height=650, scrolling=True)
+    st.caption("Read the two lanes top to bottom: the left path guesses meaning from the schema; the right path RETRIEVES governed meaning from the ontology before writing a single line of SQL. Every answer in this app runs both lanes so you can compare them live.")
     st.markdown(f"""
 **What is in this app** — four components, top to bottom:
 
@@ -1685,6 +1741,57 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                             if score < 0 else f"similarity {score:.3f}"))
                 st.caption(text[:300] + ("…" if len(text) > 300 else ""))
 
+        # ===== PARALLEL EXECUTION: both sides run CONCURRENTLY — wall-clock
+        # equals the slower call, not the sum (~40% cut). Same prompts, model,
+        # and budgets: the controlled comparison is untouched.
+        _ec = st.session_state.get("exec_cache", {})
+        _forced = st.session_state.pop("force_run", False)
+        _stale = (_ec.get("q") != user_query or _ec.get("model") != MODEL_ID)
+        _fresh = _forced or _stale or "raw_text" not in _ec
+        _fresh_sem = _forced or _stale or "sem_text" not in _ec
+        if _fresh or _fresh_sem:
+            import concurrent.futures as _cf
+            import time as _tm
+            def _api_call(_sys, _side):
+                return client.messages.create(
+                    model=MODEL_ID, max_tokens=3000, system=_sys,
+                    messages=build_messages(_side, user_query))
+            _t_par = _tm.time()
+            try:
+              with st.spinner(f"Asking {MODEL_ID} — both sides running concurrently…"):
+                with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
+                    _f_raw = _ex.submit(_api_call, raw_system, "raw") if _fresh else None
+                    _f_sem = _ex.submit(_api_call, semantic_system, "sem") if _fresh_sem else None
+                    if _stale or _forced:
+                        st.session_state.exec_cache = {}
+                    st.session_state.exec_cache.update({"q": user_query, "model": MODEL_ID})
+                    if _f_raw is not None:
+                        _rr = _f_raw.result()
+                        _u = _rr.usage
+                        st.session_state.exec_cache.update({
+                            "raw_text": response_text_of(_rr),
+                            "raw_usage": {"input_tokens": _u.input_tokens,
+                                          "output_tokens": _u.output_tokens,
+                                          "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
+                                          "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}})
+                    if _f_sem is not None:
+                        _rs = _f_sem.result()
+                        _u2 = _rs.usage
+                        st.session_state.exec_cache.update({
+                            "sem_text": response_text_of(_rs),
+                            "sem_usage": {"input_tokens": _u2.input_tokens,
+                                          "output_tokens": _u2.output_tokens,
+                                          "cache_creation_input_tokens": getattr(_u2, "cache_creation_input_tokens", 0) or 0,
+                                          "cache_read_input_tokens": getattr(_u2, "cache_read_input_tokens", 0) or 0}})
+            except Exception as _api_err:
+                st.error(f"API call failed ({type(_api_err).__name__}): {_api_err} — "
+                         "press the same question again; only the missing side will "
+                         "re-run.")
+                st.stop()
+            _par_elapsed = _tm.time() - _t_par
+            st.session_state.exec_cache["raw_elapsed"] = _par_elapsed
+            st.session_state.exec_cache["sem_elapsed"] = _par_elapsed
+
         col1, col2 = st.columns(2)
 
         def _render_side(container, response_text, elapsed, usage, side_key, extra_note=""):
@@ -1738,28 +1845,6 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
             with st.spinner("Generating query..."):
                 try:
                     t0 = time.time()
-                    _ec = st.session_state.get("exec_cache", {})
-                    _forced = st.session_state.pop("force_run", False)
-                    _stale = (_ec.get("q") != user_query or _ec.get("model") != MODEL_ID)
-                    _fresh = _forced or _stale or "raw_text" not in _ec
-                    _fresh_sem = _forced or _stale or "sem_text" not in _ec
-                    if _fresh:
-                        response_raw = client.messages.create(
-                            model=MODEL_ID,
-                            max_tokens=3000,
-                            system=raw_system,
-                            messages=build_messages("raw", user_query)
-                        )
-                        _u = response_raw.usage
-                        if _stale or _forced:
-                            st.session_state.exec_cache = {}
-                        st.session_state.exec_cache.update({"q": user_query, "model": MODEL_ID,
-                            "raw_text": response_text_of(response_raw),
-                            "raw_usage": {"input_tokens": _u.input_tokens,
-                                          "output_tokens": _u.output_tokens,
-                                          "cache_creation_input_tokens": getattr(_u, "cache_creation_input_tokens", 0) or 0,
-                                          "cache_read_input_tokens": getattr(_u, "cache_read_input_tokens", 0) or 0}})
-                    import types as _t2
                     _c = st.session_state.get("exec_cache", {})
                     if "raw_text" not in _c:
                         raise RuntimeError("No cached response — re-ask the question.")
@@ -1767,6 +1852,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     response_raw = _RawResp()
                     response_raw.content = [_t2.SimpleNamespace(text=_c["raw_text"])]
                     response_raw.usage = _t2.SimpleNamespace(**_c["raw_usage"])
+                    t0 = time.time() - _c.get("raw_elapsed", 0.0)
                     _render_side(st.container(), response_raw.content[0].text,
                                  time.time() - t0, response_raw.usage, "raw_out")
                 except Exception as e:
@@ -1779,21 +1865,6 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
             with st.spinner("Generating query..."):
                 try:
                     t0 = time.time()
-                    if _fresh_sem:
-                        response_semantic = client.messages.create(
-                            model=MODEL_ID,
-                            max_tokens=3000,
-                            system=semantic_system,
-                            messages=build_messages("sem", user_query)
-                        )
-                        _u2 = response_semantic.usage
-                        st.session_state.exec_cache.update({
-                            "sem_text": response_text_of(response_semantic),
-                            "sem_usage": {"input_tokens": _u2.input_tokens,
-                                          "output_tokens": _u2.output_tokens,
-                                          "cache_creation_input_tokens": getattr(_u2, "cache_creation_input_tokens", 0) or 0,
-                                          "cache_read_input_tokens": getattr(_u2, "cache_read_input_tokens", 0) or 0}})
-                    import types as _t3
                     _c2 = st.session_state.get("exec_cache", {})
                     if "sem_text" not in _c2:
                         raise RuntimeError("No cached semantic response — the raw side "
@@ -1802,6 +1873,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     response_semantic = _SemResp()
                     response_semantic.content = [_t3.SimpleNamespace(text=_c2["sem_text"])]
                     response_semantic.usage = _t3.SimpleNamespace(**_c2["sem_usage"])
+                    t0 = time.time() - _c2.get("sem_elapsed", 0.0)
                     sem_elapsed = time.time() - t0
                     response_text = response_semantic.content[0].text
                     if _fresh_sem:
