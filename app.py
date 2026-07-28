@@ -12,6 +12,17 @@ from pyvis.network import Network
 
 st.set_page_config(page_title="Cube Utilization POC", layout="wide")
 
+# Fresh sessions open at the TOP (browsers otherwise restore the previous
+# scroll position on refresh, dropping returning users mid-page).
+if (not st.session_state.get("chat_turns")
+        and not st.session_state.get("exec_cache")
+        and not st.session_state.get("_top_snapped")):
+    st.session_state["_top_snapped"] = True
+    components.html(
+        "<script>try{window.parent.scrollTo({top:0,left:0,behavior:'instant'});}"
+        "catch(e){window.parent.scrollTo(0,0);}</script>", height=0)
+
+
 st.title("Cube Utilization Semantic Ontology POC")
 st.markdown("How governed semantics powers trusted analytics, proactive intelligence, and operational decision support")
 
@@ -1887,11 +1898,11 @@ governed parameter like a weight/cube limit or threshold), do NOT write SQL and
 do NOT invent numbers. Output a tool block and the platform's deterministic
 engines will compute the answer:
 ```tool
-{"tool": "reroute_whatif", "orig": "SGF", "via": "HAR", "dest": "MEM"}
+{{"tool": "reroute_whatif", "orig": "SGF", "via": "HAR", "dest": "MEM"}}
 ```
 ("via": null gives the direct-lane baseline), or
 ```tool
-{"tool": "param_whatif", "action": "consolidation_opportunity", "param": "max_combined_weight_lb", "value": 25000}
+{{"tool": "param_whatif", "action": "consolidation_opportunity", "param": "max_combined_weight_lb", "value": 25000}}
 ```
 (the parameter must exist in the ontology's governed contract). One tool block
 per answer; add a one-sentence framing before it.
@@ -3110,13 +3121,3 @@ with st.expander("\U0001F4C4 Sample Data", expanded=False):
 
     with tab3:
         st.dataframe(utilization.head(10))
-
-# Fresh sessions open at the TOP (browsers otherwise restore the previous
-# scroll position on refresh, dropping returning users mid-page).
-if (not st.session_state.get("chat_turns")
-        and not st.session_state.get("exec_cache")
-        and not st.session_state.get("_top_snapped")):
-    st.session_state["_top_snapped"] = True
-    components.html(
-        "<script>try{window.parent.scrollTo({top:0,left:0,behavior:'instant'});}"
-        "catch(e){window.parent.scrollTo(0,0);}</script>", height=0)
