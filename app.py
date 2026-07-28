@@ -130,7 +130,12 @@ def validate_sql(sql):
             return False, f"Forbidden keyword: {kw}."
     ctes = set(m.lower() for m in re.findall(r"(?i)(?:WITH|,)\s*([a-zA-Z_][\w]*)\s+AS\s*\(", scrub))
     refs = set(m.lower() for m in re.findall(r"(?i)\b(?:FROM|JOIN)\s+([a-zA-Z_][\w]*)", scrub))
-    unknown = refs - ALLOWED_TABLES - ctes
+    # SQL constructs that legally follow FROM/JOIN but are NOT tables — never
+    # treat these keywords as table names (the actual source is parenthesized
+    # after them). Production replaces this regex gate with AST parsing.
+    SQL_NON_TABLES = {"lateral", "unnest", "values", "select", "generate_series",
+                      "range", "read_csv", "read_csv_auto"}
+    unknown = refs - ALLOWED_TABLES - ctes - SQL_NON_TABLES
     if unknown:
         return False, f"Table(s) not on the allowlist: {', '.join(sorted(unknown))}."
     return True, body
