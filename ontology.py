@@ -218,6 +218,18 @@ ontology = {
             ],
             "sql_equivalent": "SELECT ORIG_TRML_CD, DEST_TRML_CD, AVG(UTIL_PCT_3) AS avg_util, COUNT(*) AS trailers FROM trlr_util_fct GROUP BY 1,2 ORDER BY avg_util ASC"
         },
+        "origin_utilization": {
+            "description": "Average authoritative utilization of loads grouped by ORIGIN terminal — the planner's first cut: which origin is performing worst/best.",
+            "entities": ["Terminal", "Trailer"],
+            "grain": "one row per ORIG_TRML_CD",
+            "steps": [
+                "GROUP BY ORIG_TRML_CD on trlr_util_fct",
+                "AVG(UTIL_PCT_3) as the authoritative average (never _1 or _2)",
+                "COUNT(TRLR_NBR) for evidence weight",
+                "lowest origin sorts ASCENDING; resolve codes via terminal decodes"
+            ],
+            "sql_equivalent": "SELECT ORIG_TRML_CD, AVG(UTIL_PCT_3) AS avg_util, COUNT(*) AS loads FROM trlr_util_fct GROUP BY 1 ORDER BY 2 ASC"
+        },
         "volume_by_origin": {
             "entities": ["Shipment", "Terminal"],
             "grain": "one row per ORIG_TRML_CD",
@@ -369,6 +381,21 @@ ontology = {
     # QUERY PATTERNS: question -> metric, with the trap called out
     # -------------------------------------------------------------------
     "query_patterns": [
+        {"question": "How are we doing on trailer fill overall? How full/loaded/packed are our trailers on average? Overall fill rate?",
+         "metric": "trailer_utilization",
+         "note": "Casual phrasings of the network-average question — single number, AVG(UTIL_PCT_3)."},
+        {"question": "Which origin terminal has the lowest/highest utilization? Which center is worst on fill?",
+         "metric": "origin_utilization",
+         "note": "Origin-level grain — the planner's entry point; scoped diagnostic follows."},
+        {"question": "Can we cut/drop/reduce/trim the schedule or a run (e.g., the Friday departure) on a lane?",
+         "metric": "frequency_rationalization (ACTION)",
+         "note": "Schedule changes are governed by frequency_rationalization with evidence-sufficiency and DOW granularity — never cut below the service floor."},
+        {"question": "Is a lane pair out of balance / imbalanced? Do we have empty repositioning or backhaul problems?",
+         "metric": "backhaul_rebalance (ACTION)",
+         "note": "Directional balance: load requirement follows the max direction; the gap is a repositioning-exposure proxy."},
+        {"question": "Why do the reported and operational utilization numbers differ? Why are there two different figures?",
+         "metric": "reported_utilization",
+         "note": "The difference IS the governed exclusion: reported figures exclude service-protection loads (SHPMT_CNT = 1) per Finance policy."},
         {
             "question": "Rank the lanes by utilization (best to worst or worst to best)",
             "metric": "lane_utilization",

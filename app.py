@@ -55,7 +55,8 @@ st.sidebar.header("Configuration")
 # ---- Model selection: uncomment exactly ONE default. Both sides always use
 # the same model; every answer is captioned with the model id. The
 # ANTHROPIC_MODEL env var / Streamlit secret overrides without code changes.
-_DEFAULT_MODEL = "claude-sonnet-4-6"   # fast + smart — recommended for live demos
+_DEFAULT_MODEL = "claude-sonnet-5"     # current Sonnet (Jun 2026): near-Opus, most agentic, intro-priced
+# _DEFAULT_MODEL = "claude-sonnet-4-6" # previous Sonnet — stable fallback
 # _DEFAULT_MODEL = "claude-opus-4-8"   # deeper reasoning; slower, costlier
 # _DEFAULT_MODEL = "claude-fable-5"    # most capable; highest latency (thinking)
 MODEL_ID = os.environ.get("ANTHROPIC_MODEL", _DEFAULT_MODEL)
@@ -64,14 +65,16 @@ MODEL_ID = os.environ.get("ANTHROPIC_MODEL", _DEFAULT_MODEL)
 # rates (verify at anthropic.com/pricing — cache writes bill at ~1.25x input,
 # cache reads at ~0.1x input; thinking tokens bill as output).
 PRICING = {
+    # sonnet-5: INTRO pricing through 2026-08-31 ($2/$10), then $3/$15 — update after!
+    "claude-sonnet-5":   {"in": 2.00, "out": 10.00, "cache_write": 2.50, "cache_read": 0.20},
     "claude-sonnet-4-6": {"in": 3.00, "out": 15.00, "cache_write": 3.75, "cache_read": 0.30},
     "claude-opus-4-8":   {"in": 5.00, "out": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "claude-fable-5":    {"in": 15.00, "out": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+    "claude-fable-5":    {"in": 10.00, "out": 50.00, "cache_write": 12.50, "cache_read": 1.00},
 }
 
 def side_cost_usd(u):
     """Estimated cost of one call from its usage dict, at PRICING rates."""
-    p = PRICING.get(MODEL_ID, PRICING["claude-sonnet-4-6"])
+    p = PRICING.get(MODEL_ID, PRICING["claude-sonnet-5"])
     return (u.get("input_tokens", 0) * p["in"]
             + u.get("cache_creation_input_tokens", 0) * p["cache_write"]
             + u.get("cache_read_input_tokens", 0) * p["cache_read"]
@@ -133,8 +136,16 @@ def validate_sql(sql):
     # SQL constructs that legally follow FROM/JOIN but are NOT tables — never
     # treat these keywords as table names (the actual source is parenthesized
     # after them). Production replaces this regex gate with AST parsing.
-    SQL_NON_TABLES = {"lateral", "unnest", "values", "select", "generate_series",
-                      "range", "read_csv", "read_csv_auto"}
+    SQL_NON_TABLES = {"lateral", "unnest", "values", "select", "generate_series", "range"}
+    # SECURITY: DuckDB table functions that read files or external sources are
+    # FORBIDDEN anywhere in the query — they can expose application files/secrets.
+    FORBIDDEN_FUNCTIONS = {"read_csv", "read_csv_auto", "read_json", "read_json_auto",
+                           "read_parquet", "parquet_scan", "sqlite_scan",
+                           "postgres_scan", "httpfs", "glob", "read_text",
+                           "read_blob", "load_extension", "install"}
+    for fn in FORBIDDEN_FUNCTIONS:
+        if re.search(r"(?i)\b" + fn + r"\s*\(", scrub):
+            return False, f"Forbidden function: {fn} (file/external access is blocked)."
     unknown = refs - ALLOWED_TABLES - ctes - SQL_NON_TABLES
     if unknown:
         return False, f"Table(s) not on the allowlist: {', '.join(sorted(unknown))}."
@@ -364,6 +375,7 @@ NODE_POSITIONS = {
     # metrics row (top)
     "utilization_trend":    (0, -360),
     "reported_utilization": (-300, -360),
+    "origin_utilization": (300, -360),
     "volume_by_origin":     (-480, -240),
     "shipments_on_trailer": (-160, -240),
     "trailer_utilization":  (160, -240),
@@ -780,6 +792,10 @@ def find_frequency_candidates():
                  & (lanes['loads'] >= FP["min_load_count"])
                  & (lanes['observed_weeks'] >= FP["min_observed_weeks"])].copy()
     cand = cand[cand['SCHED_PER_WK'] - 1 >= FP["min_frequency_floor"]]
+    if cand.empty:
+        return pd.DataFrame(columns=['lane', 'avg_util', 'loads', 'observed_weeks',
+                                     'SCHED_PER_WK', 'SVC_STD_DAYS',
+                                     'weekly_saving_usd', 'dow_evidence'])
     # DOW evidence (governed): name specific weak days only when that day's
     # sample clears min_dow_load_count; otherwise evidence is lane-grain only
     GN = ontology["business_rules"]["recommendation_granularity"]["parameters"]
@@ -1145,7 +1161,7 @@ PRESET_METRIC_MAP = {
     "What is our reported utilization?": "reported_utilization",
     "What is our overall reported utilization for lanes originating from Springfield?": "reported_utilization",
     "Where can we consolidate trailers this period to save cost?": "consolidation_opportunity",
-    "Which origin terminal has the lowest utilization?": "trailer_utilization",
+    "Which origin terminal has the lowest utilization?": "origin_utilization",
 }
 
 
@@ -1183,7 +1199,7 @@ FLOW_COMPARISON_SVG = """
 <svg viewBox="0 0 940 620" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
   <text x="470" y="26" text-anchor="middle" font-size="16" font-weight="bold" fill="#212529">How the two paths work — same question, same model, different context</text>
   <rect x="280" y="40" width="380" height="40" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
-  <text x="470" y="65" text-anchor="middle" font-size="13" font-weight="bold">User asks: "What's the cube utilization for Atlanta?"</text>
+  <text x="470" y="65" text-anchor="middle" font-size="13" font-weight="bold">User asks: "What is REPORTED utilization for Atlanta-origin lanes?"</text>
   <line x1="380" y1="80" x2="235" y2="108" stroke="#555" stroke-width="2" marker-end="url(#fca)"/>
   <line x1="560" y1="80" x2="705" y2="108" stroke="#555" stroke-width="2" marker-end="url(#fca)"/>
 
@@ -1227,8 +1243,8 @@ FLOW_COMPARISON_SVG = """
   <text x="705" y="460" text-anchor="middle" font-size="11" fill="#495057">answer arrives with definition, policy, owner, and evidence</text>
 
   <rect x="140" y="504" width="660" height="46" rx="9" fill="#f3f0ff" stroke="#845ef7" stroke-width="1.5"/>
-  <text x="470" y="523" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#3b2b78">Same model. Same question. The ONLY difference is the retrieval step —</text>
-  <text x="470" y="541" text-anchor="middle" font-size="12.5" fill="#3b2b78">governed business meaning, stored as data, delivered to the model at ask-time.</text>
+  <text x="470" y="523" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#3b2b78">Same data, model, and question — the governed path ADDITIONALLY receives</text>
+  <text x="470" y="541" text-anchor="middle" font-size="12.5" fill="#3b2b78">explicit company meaning: governed definitions, rules, and action tools, delivered at ask-time.</text>
   <text x="470" y="580" text-anchor="middle" font-size="11" font-style="italic" fill="#868e96">In both paths the database does the arithmetic — the model never calculates. The difference is whether meaning is guessed or governed.</text>
   <defs><marker id="fca" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
 </svg>"""
@@ -1253,8 +1269,8 @@ RAG_EXAMPLE_SVG = """
   <rect x="510" y="40" width="410" height="200" rx="9" fill="#fff" stroke="#845ef7" stroke-width="2"/>
   <text x="715" y="62" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">3. Top-matching chunks come back (real chunk ids)</text>
   <rect x="525" y="72" width="380" height="34" rx="6" fill="#f3f0ff" stroke="#845ef7"/>
-  <text x="535" y="86" font-size="10" font-family="monospace" fill="#3b2b78">metric:trailer_utilization</text>
-  <text x="535" y="99" font-size="9.5" fill="#495057">"authoritative column is UTIL_PCT_3 — never _1 or _2"</text>
+  <text x="535" y="86" font-size="10" font-family="monospace" fill="#3b2b78">metric:reported_utilization</text>
+  <text x="535" y="99" font-size="9.5" fill="#495057">"avg UTIL_PCT_3 over reported loads — authoritative column, governed exclusion"</text>
   <rect x="525" y="112" width="380" height="34" rx="6" fill="#f3f0ff" stroke="#845ef7"/>
   <text x="535" y="126" font-size="10" font-family="monospace" fill="#3b2b78">core:terminal_codes (always on)</text>
   <text x="535" y="139" font-size="9.5" fill="#495057">"ATL = Atlanta · HAR = Harrison · SGF = Springfield …"</text>
@@ -1293,7 +1309,7 @@ RAG_EXAMPLE_SVG = """
   <text x="785" y="403" text-anchor="middle" font-size="10" fill="#495057">the number, the definition it used, the rules applied,</text>
   <text x="785" y="417" text-anchor="middle" font-size="10" fill="#495057">the SQL, and the retrieved chunks — all inspectable</text>
 
-  <text x="470" y="472" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">The ontology is DATA, not code: business meaning lives in a governed file (ontology.py here,</text>
+  <text x="470" y="472" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">The ontology is structured semantic METADATA: business meaning lives in a governed file (ontology.py here,</text>
   <text x="470" y="490" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">a semantic registry in production) — edit the meaning once, and every answer inherits the fix.</text>
   <text x="470" y="530" text-anchor="middle" font-size="11" font-style="italic" fill="#868e96">You can watch this exact pipeline live: every answer's evidence expander shows the retrieved chunks (RAG step) for that question.</text>
   <defs>
@@ -1648,7 +1664,7 @@ result: two technically valid queries, two different numbers, one business decis
     components.html(build_v1_problem(), height=340, scrolling=True)
     components.html(FLOW_COMPARISON_SVG, height=650, scrolling=True)
     components.html(RAG_EXAMPLE_SVG, height=590, scrolling=True)
-    st.caption("The retrieval step from the right-hand lane above, under the "
+    st.caption("ILLUSTRATIVE retrieval bundle (live retrieval for each real answer appears in its evidence expander) \u2014 the retrieval step from the right-hand lane above, under the "
                "microscope: an actual question matching actual chunks from this "
                "app's ontology. The amber chunk shows dependency expansion — a "
                "retrieved pattern always brings its governing rule along, whether "
@@ -1692,7 +1708,7 @@ compute; the engine does the arithmetic; the ontology supplies the meaning.
 
 🎯 **Executive (3 minutes).** Click the preset **"What is our reported utilization?"**
 Watch the same AI produce two different numbers, read the Verdict, then glance at the
-Action Panel's dollar figures. The whole argument is in that one screen.
+assistant's offer and its dollar figures. The whole argument is in that one screen.
 
 🚚 **Planner (5 minutes) — see the problem, ask why, get the move.** Press the **🚚 Planner button just below** (or the first preset in the grid) — one
 readable table names the problem terminal. The assistant then offers to run the improvement diagnostic scoped to
@@ -1700,9 +1716,13 @@ that terminal: click yes. You get the root-cause split (how much is weighed-out 
 that planning can't fix, how much is service-protection policy, what is genuinely
 addressable) and the specific consolidation moves with dollar figures. Then type a
 follow-up like *"which move should I do first?"* — the analysis is in the conversation.
+Then try a SIMULATION in plain language: type *"what if we reroute Springfield to
+Memphis through Harrison?"* — a governed engine computes the KPI deltas (including
+the service check) and the model never does the arithmetic. The 🔀 what-if widget
+above the input does the same with dropdowns.
 
 🔧 **Engineer (10 minutes).** Run any preset, open the **RAG step** expander to see
-which ontology slices were retrieved and why, check the cache-read token economics
+which ontology slices were retrieved and why, check the 💵 cost panel (tokens, dollars, and cost-per-correct-fact) and cache economics
 under each answer, then open the **Technical Appendix** for the architecture, the live
 knowledge graph, and the validation gate's honest scope.
 """)
@@ -1790,7 +1810,8 @@ if _hist:
         with st.chat_message("user"):
             st.write(_t["q"])
         with st.chat_message("assistant"):
-            st.write(_t["sem"][:400] + ("…" if len(_t["sem"]) > 400 else ""))
+            _disp = _t["sem"].split("```")[0].strip() or _t["sem"][:200]
+            st.write(_disp[:400] + ("…" if len(_disp) > 400 else ""))
 
 
 if user_query and not api_key:
@@ -1877,7 +1898,7 @@ per answer; add a one-sentence framing before it.
 
 BEGIN your response with ONE compact line in EXACTLY this format, then a blank
 line, then your explanation and query (the system parses and removes it):
-TRACE: metric=<one of: trailer_utilization, lane_utilization, volume_by_origin, shipments_on_trailer, utilization_trend, reported_utilization, NONE>; entities=<comma-separated from: Shipment, Trailer, Dispatch, Terminal, Lane, Time>
+TRACE: metric=<one of: trailer_utilization, lane_utilization, volume_by_origin, shipments_on_trailer, utilization_trend, reported_utilization, NONE, origin_utilization>; entities=<comma-separated from: Shipment, Trailer, Dispatch, Terminal, Lane, Time>
 
 {core_text}
 
@@ -1919,6 +1940,9 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                    "watch the cache-read numbers under each answer after the first question. "
                    "The honest framing: the left side is not semantics-free — the model "
                    "carries powerful IMPLICIT semantics from training and naming conventions. "
+               "The governed side ALSO carries governed simulation tools (tools are "
+               "part of the semantic contract), so the PRIMARY experimental "
+               "difference is access to the governed semantic bundle. "
                    "The comparison is implicit semantics vs EXPLICIT governed semantics. "
                    "Institutional rules (try the reported-utilization question) are where "
                    "implicit hits its ceiling.")
@@ -2023,7 +2047,16 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                 sql = extract_sql(response_text)
                 explanation = response_text.split("```")[0].strip()
                 st.write(explanation)
-                if sql is None:
+                _tool_req = extract_tool(response_text) if side_key.startswith("sem") else None
+                if _tool_req is not None:
+                    st.code(json.dumps(_tool_req, indent=2), language="json")
+                    st.caption("Governed TOOL request \u2014 routed to a deterministic "
+                               "engine, not to SQL. The gate does not apply; the engine "
+                               "itself enforces the ontology's eligibility rules.")
+                    st.session_state[side_key] = explanation
+                    ok, sql_or_reason = False, None
+                    sql = None
+                elif sql is None:
                     st.caption("Conversational answer — no query needed (answered from "
                                "the conversation context).")
                     st.session_state[side_key] = explanation
@@ -2225,7 +2258,11 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
     with st.expander("\u2705 Verified ground truth & automated fact check", expanded=False):
         st.header("Verified Ground Truth")
         _sem_cached = st.session_state.get("exec_cache", {}).get("sem_text", "")
-        if _sem_cached and extract_sql(_sem_cached) is None:
+        if _sem_cached and extract_tool(_sem_cached) is not None:
+            st.info("This was a DETERMINISTIC SIMULATION turn \u2014 a governed engine "
+                    "computed the result directly from the data; the engine IS the "
+                    "ground truth, so there is no separate fact-check to run.")
+        elif _sem_cached and extract_sql(_sem_cached) is None:
             st.info("This was a CONVERSATIONAL turn — the assistant answered from "
                     "prior context without executing a query, so there is no result "
                     "to fact-check. The stats below describe the underlying data for "
@@ -2308,7 +2345,51 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
             _pans = "\n".join(l for l in _ptxt.splitlines()
                               if not l.strip().startswith("TRACE:"))
             _pexpl = _pans.split("```")[0].strip()
-            _psql = extract_sql(_pans)
+            _ptool = extract_tool(_pans)
+            if _ptool is not None:
+                _tr = run_tool(_ptool)
+                if _pexpl:
+                    st.write(_pexpl)
+                if "error" in _tr:
+                    st.warning(_tr["error"])
+                elif _tr.get("mode") == "direct_baseline":
+                    _b1, _b2, _b3, _b4 = st.columns(4)
+                    _b1.metric("Loads on lane", _tr["loads"])
+                    _b2.metric("Avg utilization", f"{_tr['avg_util']}%")
+                    _b3.metric("Cost basis", f"${_tr['total_cost_usd']:,}")
+                    _b4.metric("Service std", f"{_tr['svc_days']}d")
+                    st.caption(_tr["note"])
+                elif _tr.get("mode") == "param_whatif":
+                    st.markdown(f"**Governed parameter what-if:** `{_tr['target']}` "
+                                f"{_tr['original']} \u2192 {_tr['tested']} (tested, then restored)")
+                    _pw = pd.DataFrame([
+                        dict(scenario="current (governed)", **_tr["before"]),
+                        dict(scenario=f"tested ({_tr['tested']})", **_tr["after"])])
+                    st.dataframe(_pw, hide_index=True, use_container_width=True)
+                    st.caption("The ontology's governed value is UNCHANGED \u2014 this "
+                               "tested the parameter and restored it. Changing it for "
+                               "real is a governance decision by the parameter's owner.")
+                else:
+                    _q1, _q2, _q3, _q4 = st.columns(4)
+                    _q1.metric("Network avg utilization", f"{_tr['after_avg_util']}%",
+                               delta=f"{round(_tr['after_avg_util'] - _tr['before_avg_util'], 1)} pts")
+                    _q2.metric("Moves", f"{_tr['new_leg_loads']} leg loads",
+                               delta=f"{_tr['net_moves_delta']:+d} vs {_tr['moved_loads']} direct",
+                               delta_color="inverse")
+                    _q3.metric("Est. cost delta", f"${_tr['cost_delta_usd']:+,}", delta_color="off")
+                    _q4.metric("Service", f"{_tr['svc_path_days']}d via",
+                               delta=f"vs {_tr['svc_direct_days']}d direct", delta_color="off")
+                    if not _tr.get("service_ok", True):
+                        st.warning("SERVICE CHECK: via-path exceeds the direct standard.")
+                st.caption("\u2699\uFE0F Deterministic simulation \u2014 a governed engine "
+                           "computed this; the model only chose WHAT to simulate.")
+                if st.session_state.pop("_turn_needs_result", False):
+                    _t3b = st.session_state.get("chat_turns", [])
+                    if _t3b and _t3b[-1]["q"] == user_query:
+                        _t3b[-1]["sem"] += "\nSIMULATION RESULT: " + str(_tr)[:600]
+                _psql = None
+            else:
+                _psql = extract_sql(_pans)
             _pres, _perr, _pok = None, None, False
             if _psql:
                 _pok, _pbody = validate_sql(_psql)
@@ -2329,7 +2410,9 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                     return f"${v:,}"
                 return f"{v:,}" if isinstance(v, int) else str(v)
 
-            if _psql and _perr is None and _pres is not None and len(_pres):
+            if _ptool is not None:
+                pass  # tool result already rendered above
+            elif _psql and _perr is None and _pres is not None and len(_pres):
                 if len(_pres) == 1:
                     st.markdown("### " + "  \u00b7  ".join(
                         f"{c.replace('_', ' ')}: **{_fmtv(c, _pres.iloc[0][c])}**"
@@ -2360,7 +2443,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                            "root cause, frequency signals, and directional balance.")
             elif _psql:
                 st.error(f"{'Execution error' if _pok else 'Validation gate'}: {_perr}")
-            else:
+            elif _ptool is None:
                 st.caption("Conversational answer \u2014 answered from the conversation "
                            "context; no query needed.")
             if _pexpl:
@@ -2417,8 +2500,12 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                 if user_query in PRESET_QUESTIONS:
                     _vf = PRESET_QUESTIONS[user_query]()[3]
                     _ec2 = st.session_state.get("exec_cache", {})
-                    _n_raw = sum(1 for _, ok in check_facts(_vf, _ec2.get("raw_text", "")) if ok)
-                    _n_sem = sum(1 for _, ok in check_facts(_vf, _ec2.get("sem_text", "")) if ok)
+                    # evaluate the SAME rendered outputs the verdict uses (they
+                    # include executed results), falling back to the raw responses
+                    _rt = st.session_state.get("raw_out") or _ec2.get("raw_text", "")
+                    _st_ = st.session_state.get("sem_out") or _ec2.get("sem_text", "")
+                    _n_raw = sum(1 for _, ok in check_facts(_vf, _rt) if ok)
+                    _n_sem = sum(1 for _, ok in check_facts(_vf, _st_) if ok)
                     _cost_df["verified_facts"] = [f"{_n_raw}/{len(_vf)}", f"{_n_sem}/{len(_vf)}"]
                     _cost_df["cost_per_correct_fact"] = [
                         (f"${_cost_df.iloc[0]['est_cost_usd'] / _n_raw:.4f}" if _n_raw else "∞ (none correct)"),
@@ -2428,7 +2515,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                 pass
             st.dataframe(_cost_df, hide_index=True, use_container_width=True)
             _delta_c = round(_cost_df.iloc[1]["est_cost_usd"] - _cost_df.iloc[0]["est_cost_usd"], 4)
-            st.caption(f"The baseline is always cheaper PER CALL — it sends ~15 tokens and "
+            st.caption(f"The baseline is always cheaper PER CALL — it sends ~15 UNCACHED tokens (its schemas ride the cache too) and "
                        f"gets a guess; the governed side sends the company's rules and gets "
                        f"a compliant answer. The difference (${_delta_c} here, ≈ "
                        f"${_delta_c * 1_000_000:,.0f} per MILLION questions) is the "
@@ -2479,7 +2566,7 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
         _scope_code = _matches[0] if _matches else None
     _scope_label = f" for {TERMINAL_NAMES[_scope_code]}-origin lanes" if _scope_code else " (network-wide)"
     with _offer_box:
-        st.markdown(f"### 💬 Assistant follow-up")
+        st.markdown("### 💬 Assistant follow-up")
         st.markdown(f"**Want me to check for improvement opportunities{_scope_label}?** "
                     f"I'll run the governed diagnostic — root cause first, then the moves.")
     if _offer_box.button(f"🔍 Yes — analyze opportunities{_scope_label}",
