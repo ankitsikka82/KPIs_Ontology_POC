@@ -1392,6 +1392,19 @@ def reroute_whatif(orig, via, dest):
         r = lane_ref[(lane_ref['ORIG_TRML_CD'] == o) & (lane_ref['DEST_TRML_CD'] == d)]
         return None if r.empty else r.iloc[0]
     direct = _lane_row(orig, dest)
+    if via is None:
+        # DIRECT BASELINE: no reroute — report the lane's current state
+        u0 = utilization
+        cur = u0[(u0['ORIG_TRML_CD'] == orig) & (u0['DEST_TRML_CD'] == dest)]
+        if direct is None:
+            return {"error": f"Lane {orig}->{dest} not in lane_ref"}
+        if len(cur) == 0:
+            return {"error": f"No loads on {orig}->{dest} in this window."}
+        return {"mode": "direct_baseline", "loads": len(cur),
+                "avg_util": round(cur['UTIL_PCT_3'].mean(), 1),
+                "total_cost_usd": int(len(cur) * direct['LANE_MILES'] * direct['CPM_USD']),
+                "svc_days": int(direct['SVC_STD_DAYS']),
+                "note": "Current state of the direct lane — pick a via terminal to simulate a reroute against this baseline."}
     leg1, leg2 = _lane_row(orig, via), _lane_row(via, dest)
     if direct is None or leg1 is None or leg2 is None:
         missing = [f"{a}->{b}" for (a, b), r in
@@ -1456,6 +1469,63 @@ def reroute_whatif(orig, via, dest):
             "cost_delta_usd": int(round(cost_added - cost_removed)),
             "svc_direct_days": svc_direct, "svc_path_days": svc_path,
             "service_ok": svc_path <= svc_direct}
+
+
+def param_whatif(action_or_rule, param, value):
+    """Governed parameter what-if: temporarily set an ontology parameter,
+    recompute the affected engine outputs, restore, and report the deltas.
+    The mutation never persists — the governed contract stays authoritative."""
+    home = None
+    for section in ("actions", "business_rules"):
+        node = ontology.get(section, {}).get(action_or_rule)
+        if node and "parameters" in node and param in node["parameters"]:
+            home = node["parameters"]
+            break
+    if home is None:
+        return {"error": f"No governed parameter '{param}' on '{action_or_rule}' — "
+                         f"parameters must exist in the ontology to be simulated."}
+    def _snapshot():
+        elig, rej = find_consolidations()
+        dg = utilization_diagnostic()
+        fr = find_frequency_candidates()
+        return {"eligible_pairs": len(elig),
+                "moves_saved": int(dg['moves']['moves_saved'].sum()) if len(dg['moves']) else 0,
+                "achievable_util": dg['achievable'],
+                "est_saving_usd": dg['total_usd'],
+                "schedule_signals": len(fr)}
+    original = home[param]
+    before = _snapshot()
+    try:
+        home[param] = value
+        after = _snapshot()
+    finally:
+        home[param] = original
+    return {"mode": "param_whatif", "target": f"{action_or_rule}.{param}",
+            "original": original, "tested": value,
+            "before": before, "after": after}
+
+
+def extract_tool(response_text):
+    """Parse a governed tool request block: ```tool\n{json}\n``` -> dict or None."""
+    m = re.search(r"```tool\s*\n(.*?)```", response_text or "", re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1).strip())
+    except Exception:
+        return {"error": "Malformed tool JSON", "raw": m.group(1)[:200]}
+
+
+def run_tool(tool):
+    """Dispatch a governed tool request to its deterministic engine."""
+    if not isinstance(tool, dict) or "tool" not in tool:
+        return {"error": "Unrecognized tool request."}
+    name = tool.get("tool")
+    if name == "reroute_whatif":
+        return reroute_whatif(tool.get("orig"), tool.get("via"), tool.get("dest"))
+    if name == "param_whatif":
+        return param_whatif(tool.get("action"), tool.get("param"), tool.get("value"))
+    return {"error": f"Unknown tool '{name}' — governed tools: reroute_whatif, param_whatif."}
 
 
 def lane_imbalance(orig=None):
@@ -1791,6 +1861,20 @@ execute it — do not fabricate result numbers.
 You additionally have access to a governed semantic ontology, provided as ALWAYS-ON
 core rules plus definitions RETRIEVED for this specific question. Follow them EXACTLY.
 
+GOVERNED SIMULATION TOOLS: for WHAT-IF questions (rerouting freight, changing a
+governed parameter like a weight/cube limit or threshold), do NOT write SQL and
+do NOT invent numbers. Output a tool block and the platform's deterministic
+engines will compute the answer:
+```tool
+{"tool": "reroute_whatif", "orig": "SGF", "via": "HAR", "dest": "MEM"}
+```
+("via": null gives the direct-lane baseline), or
+```tool
+{"tool": "param_whatif", "action": "consolidation_opportunity", "param": "max_combined_weight_lb", "value": 25000}
+```
+(the parameter must exist in the ontology's governed contract). One tool block
+per answer; add a one-sentence framing before it.
+
 BEGIN your response with ONE compact line in EXACTLY this format, then a blank
 line, then your explanation and query (the system parses and removes it):
 TRACE: metric=<one of: trailer_utilization, lane_utilization, volume_by_origin, shipments_on_trailer, utilization_trend, reported_utilization, NONE>; entities=<comma-separated from: Shipment, Trailer, Dispatch, Terminal, Lane, Time>
@@ -1825,7 +1909,9 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
     st.session_state.last_semantic_prompt = f"[SYSTEM, cached]\n{semantic_context}\n\n[USER]\n{user_query}"
 
     _primary_slot = st.container()
-    with st.expander("🔬 How this answer was produced — with/without comparison, RAG retrieval, validation gate, ground truth, verdict", expanded=False):
+    _evidence_open = (st.session_state.get("force_run", False)
+                      or st.session_state.get("exec_cache", {}).get("q") != user_query)
+    with st.expander("🔬 How this answer was produced — with/without comparison, RAG retrieval, validation gate, ground truth, verdict", expanded=_evidence_open):
         st.caption("Controlled comparison — production architecture: both sides see table "
                    "metadata plus 3 sample rows (never the full dataset), same model, question, instructions, and "
                    "3,000-token budget. Each writes SQL; DuckDB executes it. The stable context "
@@ -2326,7 +2412,31 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                  "output_tokens": _cu_s.get("output_tokens", 0),
                  "est_cost_usd": round(side_cost_usd(_cu_s), 4)},
             ])
+            # cost alone is half the story: attach correctness when we can verify it
+            try:
+                if user_query in PRESET_QUESTIONS:
+                    _vf = PRESET_QUESTIONS[user_query]()[3]
+                    _ec2 = st.session_state.get("exec_cache", {})
+                    _n_raw = sum(1 for _, ok in check_facts(_vf, _ec2.get("raw_text", "")) if ok)
+                    _n_sem = sum(1 for _, ok in check_facts(_vf, _ec2.get("sem_text", "")) if ok)
+                    _cost_df["verified_facts"] = [f"{_n_raw}/{len(_vf)}", f"{_n_sem}/{len(_vf)}"]
+                    _cost_df["cost_per_correct_fact"] = [
+                        (f"${_cost_df.iloc[0]['est_cost_usd'] / _n_raw:.4f}" if _n_raw else "∞ (none correct)"),
+                        (f"${_cost_df.iloc[1]['est_cost_usd'] / _n_sem:.4f}" if _n_sem else "∞ (none correct)"),
+                    ]
+            except Exception:
+                pass
             st.dataframe(_cost_df, hide_index=True, use_container_width=True)
+            _delta_c = round(_cost_df.iloc[1]["est_cost_usd"] - _cost_df.iloc[0]["est_cost_usd"], 4)
+            st.caption(f"The baseline is always cheaper PER CALL — it sends ~15 tokens and "
+                       f"gets a guess; the governed side sends the company's rules and gets "
+                       f"a compliant answer. The difference (${_delta_c} here, ≈ "
+                       f"${_delta_c * 1_000_000:,.0f} per MILLION questions) is the "
+                       f"governance premium — compare it to the cost of one wrong number "
+                       f"in a finance deck. The honest metric is cost per CORRECT answer: "
+                       f"on institutional questions the baseline cannot be correct at any "
+                       f"price. And production runs ONLY the governed side, so the "
+                       f"comparison itself is demo-only.")
             st.caption(f"Estimated at indicative {MODEL_ID} rates — edit PRICING in "
                        "app.py and verify current rates at anthropic.com/pricing. "
                        "Cached input bills at ~10% of fresh input, which is why "
