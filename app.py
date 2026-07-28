@@ -59,6 +59,23 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"   # fast + smart — recommended for live d
 # _DEFAULT_MODEL = "claude-opus-4-8"   # deeper reasoning; slower, costlier
 # _DEFAULT_MODEL = "claude-fable-5"    # most capable; highest latency (thinking)
 MODEL_ID = os.environ.get("ANTHROPIC_MODEL", _DEFAULT_MODEL)
+
+# ---- Indicative API prices, USD per MILLION tokens. EDIT to match current
+# rates (verify at anthropic.com/pricing — cache writes bill at ~1.25x input,
+# cache reads at ~0.1x input; thinking tokens bill as output).
+PRICING = {
+    "claude-sonnet-4-6": {"in": 3.00, "out": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+    "claude-opus-4-8":   {"in": 5.00, "out": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "claude-fable-5":    {"in": 15.00, "out": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+}
+
+def side_cost_usd(u):
+    """Estimated cost of one call from its usage dict, at PRICING rates."""
+    p = PRICING.get(MODEL_ID, PRICING["claude-sonnet-4-6"])
+    return (u.get("input_tokens", 0) * p["in"]
+            + u.get("cache_creation_input_tokens", 0) * p["cache_write"]
+            + u.get("cache_read_input_tokens", 0) * p["cache_read"]
+            + u.get("output_tokens", 0) * p["out"]) / 1_000_000
 if not api_key:
     api_key = st.session_state.get("shared_api_key", "")
 if not api_key:
@@ -1211,6 +1228,75 @@ FLOW_COMPARISON_SVG = """
   <defs><marker id="fca" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
 </svg>"""
 
+
+RAG_EXAMPLE_SVG = """
+<svg viewBox="0 0 940 560" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:980px;height:auto;display:block;margin:0 auto;font-family:Helvetica,Arial,sans-serif;">
+  <text x="470" y="26" text-anchor="middle" font-size="16" font-weight="bold" fill="#212529">One question under the microscope — how retrieval actually works</text>
+
+  <rect x="20" y="48" width="200" height="64" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="120" y="72" text-anchor="middle" font-size="12" font-weight="bold">1. The question</text>
+  <text x="120" y="90" text-anchor="middle" font-size="10.5" fill="#495057">"What's the cube utilization</text>
+  <text x="120" y="104" text-anchor="middle" font-size="10.5" fill="#495057">for Atlanta?"</text>
+  <line x1="220" y1="80" x2="258" y2="80" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
+
+  <rect x="260" y="48" width="210" height="64" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
+  <text x="365" y="70" text-anchor="middle" font-size="12" font-weight="bold">2. Search the ontology index</text>
+  <text x="365" y="87" text-anchor="middle" font-size="10.5" fill="#495057">Question is embedded and matched</text>
+  <text x="365" y="101" text-anchor="middle" font-size="10.5" fill="#495057">against ~40 chunks of business meaning</text>
+  <line x1="470" y1="80" x2="508" y2="80" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
+
+  <rect x="510" y="40" width="410" height="200" rx="9" fill="#fff" stroke="#845ef7" stroke-width="2"/>
+  <text x="715" y="62" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">3. Top-matching chunks come back (real chunk ids)</text>
+  <rect x="525" y="72" width="380" height="34" rx="6" fill="#f3f0ff" stroke="#845ef7"/>
+  <text x="535" y="86" font-size="10" font-family="monospace" fill="#3b2b78">metric:trailer_utilization</text>
+  <text x="535" y="99" font-size="9.5" fill="#495057">"authoritative column is UTIL_PCT_3 — never _1 or _2"</text>
+  <rect x="525" y="112" width="380" height="34" rx="6" fill="#f3f0ff" stroke="#845ef7"/>
+  <text x="535" y="126" font-size="10" font-family="monospace" fill="#3b2b78">core:terminal_codes (always on)</text>
+  <text x="535" y="139" font-size="9.5" fill="#495057">"ATL = Atlanta · HAR = Harrison · SGF = Springfield …"</text>
+  <rect x="525" y="152" width="380" height="34" rx="6" fill="#fff9db" stroke="#e6a700"/>
+  <text x="535" y="166" font-size="10" font-family="monospace" fill="#8a6100">rule:reported_utilization_exclusion · dependency-included</text>
+  <text x="535" y="179" font-size="9.5" fill="#495057">pulled by REFERENCE, not similarity — patterns bring their rules</text>
+  <rect x="525" y="192" width="380" height="34" rx="6" fill="#f3f0ff" stroke="#845ef7"/>
+  <text x="535" y="206" font-size="10" font-family="monospace" fill="#3b2b78">rule:temporal_convention</text>
+  <text x="535" y="219" font-size="9.5" fill="#495057">"the event date is LH_DSPTCH_DT — never SHPMT_CRT_DT"</text>
+
+  <line x1="715" y1="240" x2="715" y2="268" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
+  <rect x="510" y="270" width="410" height="70" rx="9" fill="#ebfbee" stroke="#2b8a3e" stroke-width="1.5"/>
+  <text x="715" y="292" text-anchor="middle" font-size="12" font-weight="bold">4. Bundle assembled into the model's context</text>
+  <text x="715" y="309" text-anchor="middle" font-size="10.5" fill="#495057">Always-on core rules + schemas (CACHED, reused every question)</text>
+  <text x="715" y="324" text-anchor="middle" font-size="10.5" fill="#495057">+ these retrieved slices (fresh per question)</text>
+
+  <line x1="510" y1="305" x2="250" y2="305" stroke="#555" stroke-width="2" marker-end="url(#rgb)"/>
+  <rect x="30" y="270" width="215" height="70" rx="9" fill="#fff" stroke="#1c7ed6" stroke-width="1.5"/>
+  <text x="137" y="292" text-anchor="middle" font-size="12" font-weight="bold">5. Model writes the SQL</text>
+  <text x="137" y="309" text-anchor="middle" font-size="9.5" font-family="monospace" fill="#495057">AVG(UTIL_PCT_3) WHERE</text>
+  <text x="137" y="323" text-anchor="middle" font-size="9.5" font-family="monospace" fill="#495057">ORIG_TRML_CD = 'ATL'</text>
+
+  <line x1="137" y1="340" x2="137" y2="368" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
+  <rect x="30" y="370" width="215" height="58" rx="9" fill="#fff" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="137" y="392" text-anchor="middle" font-size="12" font-weight="bold">6. Validation gate</text>
+  <text x="137" y="409" text-anchor="middle" font-size="10" fill="#495057">read-only · single statement · table allowlist</text>
+
+  <line x1="245" y1="399" x2="330" y2="399" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
+  <rect x="332" y="370" width="230" height="58" rx="9" fill="#fff" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="447" y="392" text-anchor="middle" font-size="12" font-weight="bold">7. Database computes</text>
+  <text x="447" y="409" text-anchor="middle" font-size="10" fill="#495057">DuckDB here · Databricks SQL in production</text>
+
+  <line x1="562" y1="399" x2="648" y2="399" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
+  <rect x="650" y="362" width="270" height="74" rx="9" fill="#ebfbee" stroke="#2b8a3e" stroke-width="2"/>
+  <text x="785" y="386" text-anchor="middle" font-size="12" font-weight="bold" fill="#2b8a3e">8. Answer + evidence</text>
+  <text x="785" y="403" text-anchor="middle" font-size="10" fill="#495057">the number, the definition it used, the rules applied,</text>
+  <text x="785" y="417" text-anchor="middle" font-size="10" fill="#495057">the SQL, and the retrieved chunks — all inspectable</text>
+
+  <text x="470" y="472" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">The ontology is DATA, not code: business meaning lives in a governed file (ontology.py here,</text>
+  <text x="470" y="490" text-anchor="middle" font-size="12" font-weight="bold" fill="#3b2b78">a semantic registry in production) — edit the meaning once, and every answer inherits the fix.</text>
+  <text x="470" y="530" text-anchor="middle" font-size="11" font-style="italic" fill="#868e96">You can watch this exact pipeline live: every answer's evidence expander shows the retrieved chunks (RAG step) for that question.</text>
+  <defs>
+    <marker id="rga" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker>
+    <marker id="rgb" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker>
+  </defs>
+</svg>"""
+
 def build_v1_problem():
     _naive = utilization['UTIL_PCT_3'].mean()
     _rep = utilization[utilization['SHPMT_CNT'] > 1]['UTIL_PCT_3'].mean()
@@ -1410,6 +1496,12 @@ result: two technically valid queries, two different numbers, one business decis
 """)
     components.html(build_v1_problem(), height=340, scrolling=True)
     components.html(FLOW_COMPARISON_SVG, height=650, scrolling=True)
+    components.html(RAG_EXAMPLE_SVG, height=590, scrolling=True)
+    st.caption("The retrieval step from the right-hand lane above, under the "
+               "microscope: an actual question matching actual chunks from this "
+               "app's ontology. The amber chunk shows dependency expansion — a "
+               "retrieved pattern always brings its governing rule along, whether "
+               "or not similarity found it.")
     st.caption("Read the two lanes top to bottom: the left path guesses meaning from the schema; the right path RETRIEVES governed meaning from the ontology before writing a single line of SQL. Every answer in this app runs both lanes so you can compare them live.")
     st.markdown(f"""
 **What is in this app** — four components, top to bottom:
@@ -1751,6 +1843,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                          "press the same question again; only the missing side will "
                          "re-run.")
                 st.stop()
+            st.session_state["_do_scroll"] = True
             _par_elapsed = _tm.time() - _t_par
             st.session_state.exec_cache["raw_elapsed"] = _par_elapsed
             st.session_state.exec_cache["sem_elapsed"] = _par_elapsed
@@ -2040,6 +2133,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
     # ---- PRIMARY CHAT ANSWER: answer first, visual when it helps, method last ----
     _pc = st.session_state.get("exec_cache", {})
     with _primary_slot:
+        st.markdown("<div id='answer-anchor'></div>", unsafe_allow_html=True)
         with st.chat_message("user"):
             st.write(user_query)
         with st.chat_message("assistant"):
@@ -2124,6 +2218,40 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                 st.rerun()
             st.caption("\U0001F447 Full evidence in the expander below: with/without "
                        "comparison, retrieval, gate, ground truth, verdict.")
+    if st.session_state.pop("_do_scroll", False):
+        components.html(
+            "<script>try{window.parent.document.getElementById('answer-anchor')"
+            ".scrollIntoView({behavior:'smooth',block:'start'});}catch(e){}</script>",
+            height=0)
+    # ---- COST & SPEED: plain-language economics of this answer ----
+    _cu_r = st.session_state.get("exec_cache", {}).get("raw_usage")
+    _cu_s = st.session_state.get("exec_cache", {}).get("sem_usage")
+    if _cu_r and _cu_s:
+        with st.container(border=True):
+            st.markdown("**\U0001F4B5 What this answer cost — with vs without governed semantics**")
+            _cost_df = pd.DataFrame([
+                {"side": "Without (baseline)",
+                 "time_s": round(st.session_state.exec_cache.get("raw_elapsed", 0), 1),
+                 "fresh_input_tokens": _cu_r.get("input_tokens", 0),
+                 "cached_input_tokens": _cu_r.get("cache_read_input_tokens", 0),
+                 "cache_write_tokens": _cu_r.get("cache_creation_input_tokens", 0),
+                 "output_tokens": _cu_r.get("output_tokens", 0),
+                 "est_cost_usd": round(side_cost_usd(_cu_r), 4)},
+                {"side": "With governed semantics",
+                 "time_s": round(st.session_state.exec_cache.get("sem_elapsed", 0), 1),
+                 "fresh_input_tokens": _cu_s.get("input_tokens", 0),
+                 "cached_input_tokens": _cu_s.get("cache_read_input_tokens", 0),
+                 "cache_write_tokens": _cu_s.get("cache_creation_input_tokens", 0),
+                 "output_tokens": _cu_s.get("output_tokens", 0),
+                 "est_cost_usd": round(side_cost_usd(_cu_s), 4)},
+            ])
+            st.dataframe(_cost_df, hide_index=True, use_container_width=True)
+            st.caption(f"Estimated at indicative {MODEL_ID} rates — edit PRICING in "
+                       "app.py and verify current rates at anthropic.com/pricing. "
+                       "Cached input bills at ~10% of fresh input, which is why "
+                       "repeat questions get cheaper. Both sides run only in this "
+                       "comparison demo — PRODUCTION runs the governed side alone, "
+                       "so the right-hand row is the real production cost per question.")
 
 # ===============================================================
 # CONVERSATIONAL ACTION OFFER: the assistant proposes the next step,
