@@ -309,6 +309,20 @@ ontology = {
             "owner": "Linehaul network planning",
             "provenance": {"policy": "Network Balance Guidelines", "effective": "demo placeholder"}
         },
+        "reroute_whatif": {
+            "description": "Deterministic what-if: simulate rerouting a direct lane's freight via an intermediate terminal (e.g., SGF->MEM becomes SGF->HAR + HAR->MEM), repacking onto existing leg loads where capacity allows, and report the KPI deltas.",
+            "eligibility": [
+                "Both legs must exist in lane_ref (miles, cost, service standard)",
+                "Leg capacity respected: freight packs into existing leg loads only within cube/weight limits; overflow opens new leg loads",
+                "SERVICE CHECK required: sum of leg service standards vs the direct standard — a slower path is flagged, not hidden",
+                "Timing, doors, driver cycles, and handling cost at the via terminal are NOT modeled — planning estimate only"
+            ],
+            "parameters": {"handling_note": "via-terminal handling adds cost and time not captured here"},
+            "granularity": "lane, this analysis window",
+            "impact_formula": "cost_delta_usd = new leg moves * leg miles * CPM - removed direct moves * direct miles * CPM",
+            "owner": "Linehaul network planning",
+            "provenance": {"policy": "Network Balance Guidelines", "effective": "demo placeholder"}
+        },
         "frequency_rationalization": {
             "description": "PRELIMINARY schedule-review signal: flag lanes whose observed fill is persistently low, with evidence-sufficiency thresholds before any schedule decision.",
             "eligibility": [

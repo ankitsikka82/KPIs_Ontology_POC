@@ -1382,6 +1382,82 @@ V3_STACK = """
 """
 
 
+def reroute_whatif(orig, via, dest):
+    """Deterministic simulation: move the (orig->dest) lane's freight onto
+    (orig->via)+(via->dest), repacking into existing leg loads within capacity;
+    overflow opens new leg loads. Planning estimate — timing/doors/handling
+    unmodeled (per the governed reroute_whatif action)."""
+    CP = ontology["actions"]["consolidation_opportunity"]["parameters"]
+    def _lane_row(o, d):
+        r = lane_ref[(lane_ref['ORIG_TRML_CD'] == o) & (lane_ref['DEST_TRML_CD'] == d)]
+        return None if r.empty else r.iloc[0]
+    direct = _lane_row(orig, dest)
+    leg1, leg2 = _lane_row(orig, via), _lane_row(via, dest)
+    if direct is None or leg1 is None or leg2 is None:
+        missing = [f"{a}->{b}" for (a, b), r in
+                   [((orig, dest), direct), ((orig, via), leg1), ((via, dest), leg2)]
+                   if r is None]
+        return {"error": f"Lane(s) not in lane_ref: {', '.join(missing)}"}
+    u = utilization.copy()
+    moved = u[(u['ORIG_TRML_CD'] == orig) & (u['DEST_TRML_CD'] == dest)]
+    if len(moved) == 0:
+        return {"error": f"No loads on {orig}->{dest} in this window."}
+    keep = u.drop(moved.index)
+    total_cube = float(moved['LD_CUBE_FT'].sum())
+    total_wgt = float(moved['LD_WGT_LB'].sum())
+
+    def _pack_leg(o, d, cube, wgt):
+        """Fill existing loads on the leg up to caps; overflow -> new loads."""
+        leg_loads = keep[(keep['ORIG_TRML_CD'] == o) & (keep['DEST_TRML_CD'] == d)]
+        _wo, _co = capacity_flags(leg_loads) if len(leg_loads) else (None, None)
+        absorbed = 0.0
+        new_utils = []
+        for i, r in leg_loads.iterrows():
+            if _wo is not None and (_wo.loc[i] or _co.loc[i]):
+                new_utils.append(r['UTIL_PCT_3'])
+                continue  # never add freight to capacity-constrained loads
+            room_c = CP["max_combined_cube"] - r['LD_CUBE_FT']
+            room_w = CP["max_combined_weight_lb"] - r['LD_WGT_LB']
+            if cube <= 0 or room_c <= 0 or room_w <= 0:
+                new_utils.append(r['UTIL_PCT_3'])
+                continue
+            frac = min(1.0, room_c / max(cube, 1e-9), room_w / max(wgt, 1e-9) if wgt > 0 else 1.0)
+            add_c, add_w = cube * frac, wgt * frac
+            cube -= add_c; wgt -= add_w; absorbed += add_c
+            new_utils.append(max(round((r['LD_CUBE_FT'] + add_c) / 2000 * 100, 1),
+                                 round((r['LD_WGT_LB'] + add_w) / 20000 * 100, 1)))
+        new_loads = 0
+        while cube > 1e-6 or wgt > 1e-6:
+            take_c = min(cube, CP["max_combined_cube"])
+            take_w = min(wgt, CP["max_combined_weight_lb"])
+            new_utils.append(max(round(take_c / 2000 * 100, 1),
+                                 round(take_w / 20000 * 100, 1)))
+            cube -= take_c; wgt -= take_w; new_loads += 1
+        return new_loads, new_utils
+
+    n1, utils1 = _pack_leg(orig, via, total_cube, total_wgt)
+    n2, utils2 = _pack_leg(via, dest, total_cube, total_wgt)
+    before_avg = round(u['UTIL_PCT_3'].mean(), 1)
+    other_utils = list(keep[~(((keep['ORIG_TRML_CD'] == orig) & (keep['DEST_TRML_CD'] == via))
+                              | ((keep['ORIG_TRML_CD'] == via) & (keep['DEST_TRML_CD'] == dest)))]['UTIL_PCT_3'])
+    after_utils = other_utils + utils1 + utils2
+    after_avg = round(sum(after_utils) / len(after_utils), 1) if after_utils else 0
+    moves_removed = len(moved)
+    moves_added = n1 + n2
+    cost_removed = moves_removed * float(direct['LANE_MILES'] * direct['CPM_USD'])
+    cost_added = (n1 * float(leg1['LANE_MILES'] * leg1['CPM_USD'])
+                  + n2 * float(leg2['LANE_MILES'] * leg2['CPM_USD']))
+    svc_direct = int(direct['SVC_STD_DAYS'])
+    svc_path = int(leg1['SVC_STD_DAYS'] + leg2['SVC_STD_DAYS'])
+    return {"moved_loads": moves_removed, "moved_cube": int(total_cube),
+            "new_leg_loads": moves_added,
+            "net_moves_delta": moves_added - moves_removed,
+            "before_avg_util": before_avg, "after_avg_util": after_avg,
+            "cost_delta_usd": int(round(cost_added - cost_removed)),
+            "svc_direct_days": svc_direct, "svc_path_days": svc_path,
+            "service_ok": svc_path <= svc_direct}
+
+
 def lane_imbalance(orig=None):
     """Directional balance per lane pair: driver requirement is set by the MAX
     direction; the gap is repositioning exposure (or a rerouting opportunity)."""
@@ -2060,6 +2136,7 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
         # -----------------------------------------------------------
         # GROUND TRUTH: matches the question that was asked
         # -----------------------------------------------------------
+    with st.expander("\u2705 Verified ground truth & automated fact check", expanded=False):
         st.header("Verified Ground Truth")
         _sem_cached = st.session_state.get("exec_cache", {}).get("sem_text", "")
         if _sem_cached and extract_sql(_sem_cached) is None:
@@ -2133,7 +2210,6 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
             stats3.metric("Total shipments", len(shipments))
             with st.expander("Full utilization table (for manual verification)"):
                 st.dataframe(utilization, hide_index=True, use_container_width=True)
-
 
     # ---- PRIMARY CHAT ANSWER: answer first, visual when it helps, method last ----
     _pc = st.session_state.get("exec_cache", {})
@@ -2351,6 +2427,64 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
             })
             st.caption("This analysis is now in the chat context — ask a follow-up "
                        "about it below.")
+
+with st.expander("\U0001F500 What-if: reroute a lane (deterministic simulation — no LLM)", expanded=False):
+    st.caption("Per the governed reroute_whatif action: freight from the direct lane "
+               "repacks onto existing leg loads within capacity (never onto "
+               "capacity-constrained loads); overflow opens new loads. Service is "
+               "CHECKED, not assumed. Timing, doors, and via-terminal handling are "
+               "not modeled — planning estimate.")
+    _w1, _w2, _w3, _w4 = st.columns([2, 2, 2, 1])
+    _codes = list(TERMINAL_NAMES.keys())
+    _from = _w1.selectbox("From", _codes, index=_codes.index("SGF"),
+                          format_func=lambda c: f"{TERMINAL_NAMES[c]} ({c})")
+    _via = _w2.selectbox("Via", _codes, index=_codes.index("HAR"),
+                         format_func=lambda c: f"{TERMINAL_NAMES[c]} ({c})")
+    _to = _w3.selectbox("To", _codes, index=_codes.index("MEM"),
+                        format_func=lambda c: f"{TERMINAL_NAMES[c]} ({c})")
+    _w4.markdown("<div style='height:1.7em'></div>", unsafe_allow_html=True)
+    if _w4.button("Run", type="primary", use_container_width=True):
+        if len({_from, _via, _to}) < 3:
+            st.warning("Pick three different terminals.")
+        else:
+            _rw = reroute_whatif(_from, _via, _to)
+            if "error" in _rw:
+                st.info(_rw["error"])
+            else:
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _m1.metric("Network avg utilization",
+                           f"{_rw['after_avg_util']}%",
+                           delta=f"{round(_rw['after_avg_util'] - _rw['before_avg_util'], 1)} pts vs {_rw['before_avg_util']}%")
+                _m2.metric("Linehaul moves", f"{_rw['new_leg_loads']} leg loads",
+                           delta=f"{_rw['net_moves_delta']:+d} vs {_rw['moved_loads']} direct",
+                           delta_color="inverse")
+                _m3.metric("Est. cost delta", f"${_rw['cost_delta_usd']:+,}",
+                           delta_color="off")
+                _m4.metric("Service", f"{_rw['svc_path_days']}d via path",
+                           delta=f"vs {_rw['svc_direct_days']}d direct",
+                           delta_color="off")
+                if not _rw["service_ok"]:
+                    st.warning(f"\u26A0\uFE0F SERVICE CHECK: the via-path standard "
+                               f"({_rw['svc_path_days']}d) exceeds the direct standard "
+                               f"({_rw['svc_direct_days']}d) — this reroute would need a "
+                               f"service exception or apply only to non-time-critical freight.")
+                else:
+                    st.success("Service check passed: the via path meets the direct standard.")
+                st.session_state.setdefault("chat_turns", []).append({
+                    "q": f"[what-if] Reroute {_from}->{_to} via {_via}",
+                    "raw": "Deterministic reroute simulation (no LLM).",
+                    "sem": (f"Reroute what-if {TERMINAL_NAMES[_from]}->{TERMINAL_NAMES[_to]} "
+                            f"via {TERMINAL_NAMES[_via]}: network util "
+                            f"{_rw['before_avg_util']}% -> {_rw['after_avg_util']}%, "
+                            f"moves {_rw['moved_loads']} direct -> {_rw['new_leg_loads']} leg loads "
+                            f"(net {_rw['net_moves_delta']:+d}), cost delta "
+                            f"${_rw['cost_delta_usd']:+,}, service {_rw['svc_path_days']}d "
+                            f"via vs {_rw['svc_direct_days']}d direct "
+                            f"({'OK' if _rw['service_ok'] else 'FAILS service standard'}). "
+                            f"Planning estimate: handling/timing unmodeled."),
+                })
+                st.caption("This simulation is now in the chat context — ask a "
+                           "follow-up about it below.")
 
 _chatq = st.chat_input("Ask a question or follow up — context carries automatically…")
 if _chatq and _chatq.strip():
