@@ -3111,13 +3111,24 @@ with st.expander("\U0001F4C4 Sample Data", expanded=False):
                "terminal codes like HAR. Nothing in these names says which column is authoritative "
                "or what the codes mean — that knowledge lives only in the ontology. This is what "
                "real warehouse schemas look like.")
-    tab1, tab2, tab3 = st.tabs(["Shipments", "Dispatches", "Utilization"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Shipments", "Dispatches", "Utilization", "Planned Movements", "Lane Reference"])
 
     with tab1:
         st.dataframe(shipments.head(10))
-
+        st.caption("shpmt_mstr — one row per shipment; SHPMT_CRT_DT is the CREATION date trap.")
     with tab2:
         st.dataframe(dispatches.head(10))
-
+        st.caption("lh_dsptch — one row per linehaul dispatch; SHPMT_NBR_LST is comma-packed.")
     with tab3:
         st.dataframe(utilization.head(10))
+        st.caption("trlr_util_fct — one row per trailer load; UTIL_PCT_3 is authoritative "
+                   "(the schema doesn't say so — the ontology does).")
+    with tab4:
+        st.dataframe(duck_movements.head(10))
+        st.caption("pln_mvmt — PLANNED legs, incl. multi-leg routing via the break terminal "
+                   "(A→SGF→C). Phase 3 compares these against actual legs taken.")
+    with tab5:
+        st.dataframe(lane_ref)
+        st.caption("lane_ref — the economics: every dollar figure resolves through "
+                   "LANE_MILES × CPM_USD, and every service check compares SVC_STD_DAYS.")
