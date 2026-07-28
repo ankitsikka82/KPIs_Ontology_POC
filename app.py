@@ -3008,18 +3008,28 @@ meaning once; every AI consumer compiles from it.
 utilization pre-computed in the fact table.
 """)
 
-st.header("Sample Data")
-st.caption("Deliberately realistic legacy schema: UTIL_PCT_1/2/3, LH_DSPTCH_DT vs SHPMT_CRT_DT, "
-           "terminal codes like HAR. Nothing in these names says which column is authoritative "
-           "or what the codes mean — that knowledge lives only in the ontology. This is what "
-           "real warehouse schemas look like.")
-tab1, tab2, tab3 = st.tabs(["Shipments", "Dispatches", "Utilization"])
+with st.expander("\U0001F4C4 Sample Data", expanded=False):
+    st.caption("Deliberately realistic legacy schema: UTIL_PCT_1/2/3, LH_DSPTCH_DT vs SHPMT_CRT_DT, "
+               "terminal codes like HAR. Nothing in these names says which column is authoritative "
+               "or what the codes mean — that knowledge lives only in the ontology. This is what "
+               "real warehouse schemas look like.")
+    tab1, tab2, tab3 = st.tabs(["Shipments", "Dispatches", "Utilization"])
 
-with tab1:
-    st.dataframe(shipments.head(10))
+    with tab1:
+        st.dataframe(shipments.head(10))
 
-with tab2:
-    st.dataframe(dispatches.head(10))
+    with tab2:
+        st.dataframe(dispatches.head(10))
 
-with tab3:
-    st.dataframe(utilization.head(10))
+    with tab3:
+        st.dataframe(utilization.head(10))
+
+# Fresh sessions open at the TOP (browsers otherwise restore the previous
+# scroll position on refresh, dropping returning users mid-page).
+if (not st.session_state.get("chat_turns")
+        and not st.session_state.get("exec_cache")
+        and not st.session_state.get("_top_snapped")):
+    st.session_state["_top_snapped"] = True
+    components.html(
+        "<script>try{window.parent.scrollTo({top:0,left:0,behavior:'instant'});}"
+        "catch(e){window.parent.scrollTo(0,0);}</script>", height=0)
