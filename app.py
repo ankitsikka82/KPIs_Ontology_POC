@@ -147,6 +147,14 @@ def validate_sql(sql):
     # SQL constructs that legally follow FROM/JOIN but are NOT tables — never
     # treat these keywords as table names (the actual source is parenthesized
     # after them). Production replaces this regex gate with AST parsing.
+    # SECURITY: DuckDB resolves a QUOTED string after FROM/JOIN as a FILE PATH
+    # (format inferred by extension) — block quoted sources and URL schemes
+    # outright. Comments are already stripped from scrub, so these cannot be
+    # smuggled through comment text.
+    if re.search(r"""(?is)\b(?:FROM|JOIN)\s*['"]""", scrub):
+        return False, "Quoted file paths / external sources after FROM or JOIN are not allowed."
+    if re.search(r"(?i)\b(?:https?|s3|s3a|azure|az|gs|gcs|hf)://", body):
+        return False, "External URLs are not allowed (anywhere in the query)."
     SQL_NON_TABLES = {"lateral", "unnest", "values", "select", "generate_series", "range"}
     # SECURITY: DuckDB table functions that read files or external sources are
     # FORBIDDEN anywhere in the query — they can expose application files/secrets.
@@ -1267,8 +1275,8 @@ RAG_EXAMPLE_SVG = """
 
   <rect x="20" y="48" width="200" height="64" rx="9" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
   <text x="120" y="72" text-anchor="middle" font-size="12" font-weight="bold">1. The question</text>
-  <text x="120" y="90" text-anchor="middle" font-size="10.5" fill="#495057">"What's the cube utilization</text>
-  <text x="120" y="104" text-anchor="middle" font-size="10.5" fill="#495057">for Atlanta?"</text>
+  <text x="120" y="90" text-anchor="middle" font-size="10.5" fill="#495057">"What is REPORTED utilization</text>
+  <text x="120" y="104" text-anchor="middle" font-size="10.5" fill="#495057">for Atlanta-ORIGIN lanes?"</text>
   <line x1="220" y1="80" x2="258" y2="80" stroke="#555" stroke-width="2" marker-end="url(#rga)"/>
 
   <rect x="260" y="48" width="210" height="64" rx="9" fill="#e7f5ff" stroke="#1c7ed6" stroke-width="1.5"/>
@@ -1521,6 +1529,17 @@ def param_whatif(action_or_rule, param, value):
                 "est_saving_usd": dg['total_usd'],
                 "schedule_signals": len(fr)}
     original = home[param]
+    # VALIDATE + COERCE the model-supplied value before touching the ontology
+    if isinstance(original, (int, float)):
+        try:
+            value = type(original)(float(value))
+        except (TypeError, ValueError):
+            return {"error": f"'{value}' is not a valid number for {param}."}
+        if value <= 0:
+            return {"error": f"{param} must be positive (got {value})."}
+        if value > original * 100:
+            return {"error": f"{value} is implausibly large for {param} "
+                             f"(governed value: {original}). Pick a realistic test value."}
     before = _snapshot()
     try:
         home[param] = value
@@ -1544,15 +1563,22 @@ def extract_tool(response_text):
 
 
 def run_tool(tool):
-    """Dispatch a governed tool request to its deterministic engine."""
-    if not isinstance(tool, dict) or "tool" not in tool:
-        return {"error": "Unrecognized tool request."}
-    name = tool.get("tool")
-    if name == "reroute_whatif":
-        return reroute_whatif(tool.get("orig"), tool.get("via"), tool.get("dest"))
-    if name == "param_whatif":
-        return param_whatif(tool.get("action"), tool.get("param"), tool.get("value"))
-    return {"error": f"Unknown tool '{name}' — governed tools: reroute_whatif, param_whatif."}
+    """Dispatch a governed tool request to its deterministic engine.
+    Never raises: a malformed model-generated request produces a controlled
+    error dict, not a dead answer."""
+    try:
+        if not isinstance(tool, dict) or "tool" not in tool:
+            return {"error": "Unrecognized tool request."}
+        name = tool.get("tool")
+        if name == "reroute_whatif":
+            return reroute_whatif(tool.get("orig"), tool.get("via"), tool.get("dest"))
+        if name == "param_whatif":
+            return param_whatif(tool.get("action"), tool.get("param"), tool.get("value"))
+        return {"error": f"Unknown tool '{name}' — governed tools: reroute_whatif, param_whatif."}
+    except Exception as e:
+        return {"error": f"Tool execution failed ({type(e).__name__}: {str(e)[:120]}) — "
+                         "the request may reference terminals or parameters that "
+                         "don't exist in the governed contract."}
 
 
 def lane_imbalance(orig=None):
@@ -1821,8 +1847,10 @@ if _hist:
         with st.chat_message("user"):
             st.write(_t["q"])
         with st.chat_message("assistant"):
+            if _t.get("answer_md"):
+                st.markdown("**" + _t["answer_md"] + "**")
             _disp = _t["sem"].split("```")[0].strip() or _t["sem"][:200]
-            st.write(_disp[:400] + ("…" if len(_disp) > 400 else ""))
+            st.caption(_disp[:300] + ("…" if len(_disp) > 300 else ""))
 
 
 if user_query and not api_key:
@@ -1844,6 +1872,12 @@ if user_query and api_key:
     raw_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
+SCOPE: this assistant covers cube utilization and linehaul planning. If a
+question is clearly outside that scope (e.g., weather, sports), say so briefly
+instead of forcing a query. If a question is materially AMBIGUOUS - reported vs
+operational utilization, origin vs destination for a terminal, or an undefined
+concept like a customer "causing" low utilization - ask ONE short clarifying
+question instead of assuming; do not write SQL for an assumed interpretation.
 EXCEPTION: if the question is PURELY about prioritizing, comparing, or explaining
 results ALREADY DISPLAYED in prior turns, answer directly WITHOUT any SQL block.
 STRICT LIMIT: any request for NEW numbers — breakdowns by a dimension, different
@@ -1871,6 +1905,12 @@ fenced block. The system will execute it — do not fabricate result numbers.
     semantic_context = f"""You are a freight analytics assistant. You CANNOT see the data —
 only the table schemas and sample rows below. Write ONE DuckDB SQL SELECT query
 that answers the user's question when executed against these tables.
+SCOPE: this assistant covers cube utilization and linehaul planning. If a
+question is clearly outside that scope (e.g., weather, sports), say so briefly
+instead of forcing a query. If a question is materially AMBIGUOUS - reported vs
+operational utilization, origin vs destination for a terminal, or an undefined
+concept like a customer "causing" low utilization - ask ONE short clarifying
+question instead of assuming; do not write SQL for an assumed interpretation.
 EXCEPTION: if the question is PURELY about prioritizing, comparing, or explaining
 results ALREADY DISPLAYED in prior turns, answer directly WITHOUT any SQL block.
 STRICT LIMIT: any request for NEW numbers — breakdowns by a dimension, different
@@ -2466,6 +2506,15 @@ RETRIEVED SEMANTIC CONTEXT for this question (top matches from the ontology inde
                 if _t2 and _t2[-1]["q"] == user_query:
                     _t2[-1]["sem"] += ("\nRESULT (top rows): "
                                        + str(_pres.head(5).to_dict("records"))[:600])
+                    # human-facing summary for history bubbles
+                    if len(_pres) == 1:
+                        _t2[-1]["answer_md"] = "  ·  ".join(
+                            f"{c.replace('_', ' ')}: {_fmtv(c, _pres.iloc[0][c])}"
+                            for c in _pres.columns[:4])
+                    else:
+                        _t2[-1]["answer_md"] = (f"{len(_pres)} rows — top: " + ", ".join(
+                            f"{c.replace('_', ' ')} {_fmtv(c, _pres.iloc[0][c])}"
+                            for c in _pres.columns[:3]))
             _sg1, _sg2 = st.columns(2)
             if _sg1.button("\U0001F4CA Break that down by lane", key="sugg_lane"):
                 st.session_state.selected_query = "Break that down by lane"
@@ -2554,18 +2603,21 @@ if _lq and any(w in _lq.lower() for w in ["utilization", "cube", "volume", "trai
     _NAME_TO_CODE = {v.lower(): k for k, v in TERMINAL_NAMES.items()}
     _turns = st.session_state.get("chat_turns", [])
     _scan = _lq.lower() + " " + (_turns[-1]["sem"].lower() if _turns else "")
+    # STRUCTURED FIRST: if the last turn stored an executed RESULT, pull the
+    # leading origin code directly — no prose inference needed
+    _struct = re.findall(r"'ORIG_TRML_CD':\s*'([A-Z]{3})'",
+                         _turns[-1]["sem"]) if _turns else []
     _found = []
     for _nm, _cd in _NAME_TO_CODE.items():
         _pos = _scan.find(_nm)
         if _pos < 0:
-            for _tok in (f" {_cd.lower()} ", f"({_cd.lower()})"):
-                _p2 = f" {_scan} ".find(_tok)
-                if _p2 >= 0:
-                    _pos = _p2
-                    break
+            _m = re.search(r"\b" + _cd.lower() + r"\b", _scan)
+            _pos = _m.start() if _m else -1
         if _pos >= 0:
             _found.append((_pos, _cd))
     _matches = [cd for _p, cd in sorted(_found)]  # ordered by first mention
+    if _struct and _struct[0] in TERMINAL_NAMES and _struct[0] not in _matches[:1]:
+        _matches = [_struct[0]] + [c for c in _matches if c != _struct[0]]
     _offer_box = st.container(border=True)
     if len(_matches) > 1:
         _choice = _offer_box.radio("Multiple terminals mentioned — scope the analysis to:",
@@ -2849,7 +2901,7 @@ FLOW_SVG = """
 
   <rect x="550" y="135" width="370" height="72" rx="8" fill="#e6f4d7" stroke="#4f772d" stroke-width="1.5"/>
   <text x="735" y="158" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a2e05">Prompt = ontology (JSON) + schemas + question</text>
-  <text x="735" y="178" text-anchor="middle" font-size="12" fill="#1a2e05">json.dumps(ontology) prepended as text.</text>
+  <text x="735" y="178" text-anchor="middle" font-size="12" fill="#1a2e05">assemble_semantic_slices() - always-on core + retrieved slices prepended as text.</text>
   <text x="735" y="196" text-anchor="middle" font-size="12" fill="#1a2e05">"lane" has a definition + computation steps.</text>
 
   <line x1="245" y1="207" x2="245" y2="237" stroke="#555" stroke-width="2" marker-end="url(#a)"/>

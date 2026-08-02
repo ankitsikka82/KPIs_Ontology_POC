@@ -156,6 +156,22 @@ for _, dispatch in dispatches_df.iterrows():
         'SHPMT_CNT': len(shipment_ids)
     })
 
+# PHYSICAL CAP: no load may exceed trailer cube capacity; scale the load's
+# member-shipment cubes proportionally so shipment sums stay consistent.
+for _r in utilization_records:
+    if _r["LD_CUBE_FT"] > 2000:
+        _f = 2000.0 / _r["LD_CUBE_FT"]
+        _members = set(str(_r.get("SHPMT_NBR_LST", "")).split(","))
+        _r["LD_CUBE_FT"] = 2000
+        _r["UTIL_PCT_1"] = 100.0
+        _r["UTIL_PCT_3"] = float(max(_r["UTIL_PCT_1"], _r["UTIL_PCT_2"]))
+        try:
+            shipments.loc[shipments["SHPMT_NBR"].isin(_members), "CUBE_FT"] = (
+                shipments.loc[shipments["SHPMT_NBR"].isin(_members), "CUBE_FT"] * _f
+            ).round(1)
+        except Exception:
+            pass
+
 utilization_df = pd.DataFrame(utilization_records)
 
 
@@ -262,6 +278,20 @@ utilization_df = pd.concat([utilization_df, pd.DataFrame(extra_util)],
 lane_ref.to_csv('lane_ref.csv', index=False)
 
 shipments.to_csv('shipments.csv', index=False)
+# Coverage: every shipment gets at least a direct planned leg (closes the
+# seeded-scenario gap flagged in review).
+_pm_have = set(planned_movements_df["SHPMT_NBR"])
+_extra = []
+for _, _s in shipments.iterrows():
+    if _s["SHPMT_NBR"] not in _pm_have:
+        _extra.append({"MVMT_NBR": f"MVMT_S{len(_extra):04d}",
+                       "SHPMT_NBR": _s["SHPMT_NBR"], "LEG_SEQ_NBR": 1,
+                       "ORIG_TRML_CD": _s["ORIG_TRML_CD"],
+                       "DEST_TRML_CD": _s["DEST_TRML_CD"],
+                       "SVC_TYP_CD": _s.get("SVC_TYP_CD", "STD")})
+if _extra:
+    planned_movements_df = pd.concat(
+        [planned_movements_df, pd.DataFrame(_extra)], ignore_index=True)
 planned_movements_df.to_csv('planned_movements.csv', index=False)
 dispatches_df.to_csv('dispatches.csv', index=False)
 utilization_df.to_csv('cube_utilization.csv', index=False)
