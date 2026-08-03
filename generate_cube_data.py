@@ -158,19 +158,20 @@ for _, dispatch in dispatches_df.iterrows():
 
 # PHYSICAL CAP: no load may exceed trailer cube capacity; scale the load's
 # member-shipment cubes proportionally so shipment sums stay consistent.
+_disp_members = dict(zip(dispatches_df["TRLR_NBR"], dispatches_df["SHPMT_NBR_LST"]))
+shipments["TOT_CUBE_FT"] = shipments["TOT_CUBE_FT"].astype(float)
 for _r in utilization_records:
     if _r["LD_CUBE_FT"] > 2000:
         _f = 2000.0 / _r["LD_CUBE_FT"]
-        _members = set(str(_r.get("SHPMT_NBR_LST", "")).split(","))
+        _members = set(str(_disp_members.get(_r["TRLR_NBR"], "")).split(","))
+        _members.discard("")
         _r["LD_CUBE_FT"] = 2000
         _r["UTIL_PCT_1"] = 100.0
         _r["UTIL_PCT_3"] = float(max(_r["UTIL_PCT_1"], _r["UTIL_PCT_2"]))
-        try:
-            shipments.loc[shipments["SHPMT_NBR"].isin(_members), "CUBE_FT"] = (
-                shipments.loc[shipments["SHPMT_NBR"].isin(_members), "CUBE_FT"] * _f
-            ).round(1)
-        except Exception:
-            pass
+        if _members:
+            _mask = shipments["SHPMT_NBR"].isin(_members)
+            shipments.loc[_mask, "TOT_CUBE_FT"] = (
+                shipments.loc[_mask, "TOT_CUBE_FT"] * _f).round(1)
 
 utilization_df = pd.DataFrame(utilization_records)
 
