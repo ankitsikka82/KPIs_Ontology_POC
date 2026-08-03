@@ -34,6 +34,20 @@ TERMINAL_NAMES = {"HAR": "Harrison", "SGF": "Springfield", "STL": "Saint Louis",
                   "MEM": "Memphis", "ATL": "Atlanta"}
 
 
+def _heat(v):
+    """Band-based cell shading (no matplotlib dependency)."""
+    if pd.isna(v):
+        return ""
+    if v >= 1.0:
+        return "background-color:#f8d7da;color:#842029;font-weight:bold"
+    if v >= 0.85:
+        return "background-color:#fff3cd;color:#664d03"
+    if v >= 0.5:
+        return "background-color:#fefce8;color:#3f6212"
+    return "background-color:#d1e7dd;color:#0f5132"
+
+
+
 @st.cache_data
 def load_data():
     return (pd.read_csv("shipments.csv"), pd.read_csv("planned_movements.csv"),
@@ -139,7 +153,7 @@ with tab_term:
     piv.index = [f"{TERMINAL_NAMES.get(i, i)} ({i})" for i in piv.index]
     st.dataframe(
         piv[["P&D routes", "Dock labor", "Doors", "LH drivers"]].style.format(
-            "{:.0%}").background_gradient(cmap="RdYlGn_r", vmin=0, vmax=1.2),
+            "{:.0%}").map(_heat),
         width="stretch")
     st.caption(
         "The break terminal (SGF) carries transfer freight belonging to the "
@@ -163,8 +177,7 @@ with tab_lane:
                          .max(axis=1)).round(1)})
     lanes = lanes[lc["used"] > 0].sort_values("headroom (x)")
     st.dataframe(lanes.style.format({"cube util": "{:.0%}", "weight util": "{:.0%}"})
-                 .background_gradient(cmap="RdYlGn_r", vmin=0, vmax=1.2,
-                                      subset=["cube util", "weight util"]),
+                 .map(_heat, subset=["cube util", "weight util"]),
                  width="stretch")
     st.caption(
         "Lanes with zero planned flow (scheduled but empty under the strict "
